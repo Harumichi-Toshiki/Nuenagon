@@ -224,9 +224,9 @@ void piece_and_hand_rows(const ViewBoard& post, const ViewDelta& d, Rows& r) {
 // それ以外の区間の組は、両端と間の駒が変わらないので、指す前と後で同じ。
 // 1回の走査で、指す前（minus）と指した後（plus）の2つの列を追う。
 void b1_line_rows(const ViewBoard& post, const ViewDelta& d, int version, int line, Rows& r) {
-    int sq[9];
-    const int n = line_squares(line, sq);
-    const int axis = axis_of_line(line);
+    const int* sq = kLineTable.sq[line];
+    const int n = kLineTable.n[line];
+    const int axis = kLineTable.axis[line];
     int pre_prev = -1, pre_prev_pc = -1;    // 指す前：直前の駒のマスと駒番号
     int post_prev = -1, post_prev_pc = -1;  // 指した後
     bool pre_changed = false, post_changed = false;  // 直前の駒（その駒を含む）から今のマスまでに変わったマスがあるか

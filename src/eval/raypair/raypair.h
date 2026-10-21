@@ -82,4 +82,13 @@ int axis_of_line(int line);
 // ライン上のマスを走査順（§F2.1 B1 の表の「手前 → 奥」）に out へ書き、マス数を返す。out は9要素以上
 int line_squares(int line, int* out);
 
+// 上の2つの表を、コンパイル時に作った表にしたもの（差分更新で使う。内容は同じ）
+struct LineTable {
+    int axis[kLines];
+    int n[kLines];
+    int sq[kLines][9];
+};
+LineTable make_line_table();
+inline const LineTable kLineTable = make_line_table();
+
 }  // namespace raypair

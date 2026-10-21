@@ -196,4 +196,13 @@ int line_squares(int line, int* out) {
     return n;
 }
 
+LineTable make_line_table() {
+    LineTable t{};
+    for (int line = 0; line < kLines; line++) {
+        t.axis[line] = axis_of_line(line);
+        t.n[line] = line_squares(line, t.sq[line]);
+    }
+    return t;
+}
+
 }  // namespace raypair
