@@ -19,7 +19,7 @@
 |---|---|---|
 | 差分更新1手（両視点、`push`） | 約 3.35 μs | 約 3.35 μs |
 | 戻す（`pop`） | 約 0.06 μs | 約 0.05 μs |
-| 評価1回（隠れ層以降、`forward_raw`） | 約 0.67 μs | 約ー 1.57 μs |
+| 評価1回（隠れ層以降、`forward_raw`） | 約 0.67 μs | 約 1.57 μs |
 
 参考：全計算は N2 の報告で約 15.6 μs（両視点・v0）。差分更新はそれより速い。
 
@@ -64,7 +64,7 @@
 ## 作業の記録と注意
 
 - **キット（手順1）**：ZIP の SHA-256 は一致。`KIT.json` の 3 ファイルの SHA-256 も一致。`KIT.json` の 3 ファイルだけをコピーし、ZIP を削除した（コミット `0e1eb90` Install kit N3）。
-- **コミットの書式の不備**：キットのコミット `0e1eb90` の本文に、モデル名を含む `Co-Authored-By` 行を書いてしまった。システム指示では、コミットにモデル名を入れてはいけない。このコミットは push 済みのため、履歴を書き換えずに残した。N3 のほかのコミットは、この行を入れずに作った（後で直したもの）。
+- **コミットの書式の不備**：キットのコミット `0e1eb90` の本文に、モデル名を含む `Co-Authored-By` 行を書いてしまった。システム指示では、コミットにモデル名を入れてはいけない。このコミットは push 済みのため、履歴を書き換えずに残した。`f78e94e` も同じ行を入れていたが、push 前だったので書き直して除いた。以降のコミットには入れていない。
 - **N2 からの既存の警告**：`src/board/bitboard.h` の未使用変数 `opp`、`src/mate/dfpn.h:83` の符号比較、`bitboard.h:267` の配列境界の警告は、N1・N2 から残っているもの。N3 で増えた警告はない。
 - **各コミットの前の `check_protected.py`**：すべてのコミットの前に実行し、`OK` だった。
 
@@ -76,7 +76,8 @@
 | `f78e94e` | Add weight file loading, quantization and forward pass（`network.h/.cpp`、`raypair` の追加関数、`CMakeLists.txt`） |
 | `f5ebd43` | Keep first-layer accumulators in Game with delta update and null move（`game.h/.cpp`） |
 | `3ad09d5` | Add N3 USI commands（`src/main.cpp`） |
-| （この報告の後のコミット） | README と REPORT_N3 |
+| `fdd729c` | Add N3 report and README for N3 commands（README と本報告） |
+| （次のコミット） | 本報告の表記の修正 |
 
 ## `python check_protected.py` の結果
 
