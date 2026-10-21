@@ -707,7 +707,10 @@ Job::Job(const Game& root, const Limits& lim, const Options& opt, const EvalRef&
     sh_.node_limit = lim.nodes;
 }
 
-void Job::stop() { sh_.stop = true; }
+void Job::stop() {
+    searching_ = false;  // 根の詰み探索も、この合図で止まる
+    sh_.stop = true;
+}
 
 long long Job::nodes() const { return sh_.nodes.load(); }
 
@@ -784,13 +787,14 @@ void Job::run() {
 
     // 根の詰み探索（§E5.7）：短い時間（ノード数）だけ詰みを探し、見つかればその手で終える
     if (!null_root_ && !lim_.ponder && sh_.ev.net) {
-        std::atomic<bool> flag{true};
-        DfpnSearcher mate(&flag, kMateProbeTableSize);  // 表はこの探索専用（共有の変数は使わない）
+        DfpnSearcher mate(&searching_, kMateProbeTableSize);  // 表はこの探索専用（共有の変数は使わない）
         mate.set_max_nodes(kMateProbeNodes);
-        // 詰み探索は持ち時間の1割まで（締め切りが無い探索では 200ms まで）
-        const long long now = now_ms();
-        const long long dl = sh_.deadline_ms.load();
-        mate.set_deadline_ms(now + (dl > 0 ? std::max<long long>(1, (dl - now) / 10) : kMateProbeMsNoLimit));
+        // 詰み探索は持ち時間の1割まで（締め切りが無い探索では 200ms まで）。決定的モードでは時間で止めない（§E5.9）
+        if (!sh_.opt.deterministic) {
+            const long long now = now_ms();
+            const long long dl = sh_.deadline_ms.load();
+            mate.set_deadline_ms(now + (dl > 0 ? std::max<long long>(1, (dl - now) / 10) : kMateProbeMsNoLimit));
+        }
         if (mate.search_mate(game.board)) {
             const std::string usi = mate.get_best_mate();
             for (const RootMove& r : rm) {

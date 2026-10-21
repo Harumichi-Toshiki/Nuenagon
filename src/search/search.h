@@ -167,6 +167,7 @@ public:
 private:
     long long budget_ms() const;   // 今の制限から思考時間（ms）を求める。制限なしは -1（§E2.4 の NetworkDelay を差し引く）
 
+    std::atomic<bool> searching_{true};  // 根の詰み探索の続行（stop で false になる。詰み探索はこの合図を見る）
     Game root_;
     Limits lim_;
     ThreadPool* pool_;
