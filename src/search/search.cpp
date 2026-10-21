@@ -11,6 +11,7 @@
 
 #include "eval/raypair/raypair.h"
 #include "mate/dfpn.h"
+#include "platform/cpu_affinity.h"
 
 namespace search {
 
@@ -175,8 +176,11 @@ const std::vector<HintEntry>* HintTable::find(uint64_t key) const {
 
 // ---------- スレッドプール（§E5.2） ----------
 
-ThreadPool::ThreadPool(int n) {
-    for (int i = 0; i < n; i++) workers_.emplace_back([this] { loop(); });
+ThreadPool::ThreadPool(int n, std::vector<int> cpus) : cpus_(std::move(cpus)) {
+    for (int i = 0; i < n; i++) workers_.emplace_back([this, i] { loop(i); });
+    // 固定が済むまで待つ（固定に失敗したワーカーの数を、作った直後に分かるようにする）
+    std::unique_lock<std::mutex> lk(mu_);
+    cv_.wait(lk, [this, n] { return started_ == n; });
 }
 
 ThreadPool::~ThreadPool() {
@@ -196,7 +200,16 @@ void ThreadPool::submit(std::function<void()> task) {
     cv_.notify_one();
 }
 
-void ThreadPool::loop() {
+void ThreadPool::loop(int index) {
+    if (!cpus_.empty()) {
+        std::string err;
+        if (!cpu::pin_current_thread(cpus_[(index + 1) % cpus_.size()], err)) pin_failures_++;
+    }
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        started_++;
+    }
+    cv_.notify_all();
     for (;;) {
         std::function<void()> task;
         {
@@ -742,6 +755,13 @@ void Job::ponder_hit() {
 
 void Job::run() {
     const long long start = now_ms();
+    // 駆動スレッドは、cpus の先頭の論理CPUに固定する（§E2.4。ヘルパーは残りの CPU）
+    if (!sh_.opt.cpus.empty()) {
+        std::string err;
+        if (!cpu::pin_current_thread(sh_.opt.cpus[0], err) && sh_.sink) {
+            sh_.sink("info string Nuenagon cpu: 探索スレッドを固定できない（" + err + "）。OS に任せる");
+        }
+    }
     if (!lim_.ponder) {
         const long long b = budget_ms();
         sh_.deadline_ms = b > 0 ? start + b : 0;

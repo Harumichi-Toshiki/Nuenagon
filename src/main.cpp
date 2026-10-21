@@ -16,6 +16,7 @@
 #include "eval/raypair/network.h"
 #include "eval/raypair/raypair.h"
 #include "mate/dfpn.h"
+#include "platform/cpu_affinity.h"
 #include "search/search.h"
 
 namespace {
@@ -137,19 +138,19 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
     else if (name == "NetworkDelay") opt.network_delay = std::clamp(as_int(120), 0, 10000);
     else if (name == "USI_Ponder") opt.usi_ponder = (value == "true");
     else if (name == "Deterministic") opt.deterministic = (value == "true");
-    else if (name == "CpuAffinity") opt.cpu_affinity = value;     // 受け付けて覚えるだけ（N5 で使う）
+    else if (name == "CpuAffinity") opt.cpu_affinity = value;     // 論理CPUの指定（§E2.4。isready・go で反映する）
     else if (name == "UsePhysicalCoresOnly") opt.physical_only = (value == "true");
 }
 
-// isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする
-void cmd_isready(Game& game, EvalState& ev) {
+// isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする。
+// 準備できたら true を返す（readyok は呼び出し側が、CPU の情報の後に出す）。読み込みに失敗したら false
+bool cmd_isready(Game& game, EvalState& ev) {
     reply(std::string("info string Nuenagon build: simd=") + (NUENAGON_SIMD_AVX2 ? "avx2" : "scalar"));
     if (!ev.file_set && !std::ifstream(ev.file).good()) {
         ev.loaded = false;
         game.set_network(nullptr);
         reply("info string eval: no weight file (" + ev.file + ")");
-        reply("readyok");
-        return;
+        return true;
     }
     raypair::Network net;
     std::string err;
@@ -157,7 +158,7 @@ void cmd_isready(Game& game, EvalState& ev) {
         ev.loaded = false;
         game.set_network(nullptr);
         reply("info string eval load error: " + err);
-        return;
+        return false;
     }
     ev.net = std::move(net);
     ev.loaded = true;
@@ -170,7 +171,7 @@ void cmd_isready(Game& game, EvalState& ev) {
          << " W=" << raypair::kW << " L1=" << ev.net.L1 << " L2=" << ev.net.L2
          << " eval_scale=" << ev.scale << (ev.scale_option > 0 ? " (option)" : " (file)");
     reply(info.str());
-    reply("readyok");
+    return true;
 }
 
 // 差分で保っている蓄積値の検査（DebugCheckAccumulator が true のとき。§E3.4）
@@ -312,8 +313,11 @@ struct Engine {
     search::Options opt;
     search::TranspositionTable tt;
     search::HintTable hints;
+    cpu::Topology topo = cpu::query_topology();  // CPU の構成（起動時に一度だけ調べる。§E2.4）
+    std::string cpu_error;                       // CpuAffinity の指定の問題（あれば）
     std::unique_ptr<search::ThreadPool> pool;
     int pool_size = -1;
+    std::vector<int> pool_cpus;                  // 今のプールのワーカーが固定されている CPU
     int tt_mb = -1;
     std::shared_ptr<search::Job> job;
     std::thread driver;
@@ -331,17 +335,39 @@ struct Engine {
     ~Engine() { stop_job(); }
 };
 
-// 置換表とスレッドプールを、設定（Threads・USI_Hash）に合わせる。ジョブが無いときに呼ぶ
+// 置換表とスレッドプールを、設定（Threads・USI_Hash・CpuAffinity・UsePhysicalCoresOnly）に合わせる。ジョブが無いときに呼ぶ
 void apply_config(Engine& e) {
     if (e.tt_mb != e.opt.hash_mb) {
         e.tt.resize(e.opt.hash_mb);
         e.tt_mb = e.opt.hash_mb;
     }
+    // 探索スレッドを固定する CPU（§E2.4）。指定が読めなければ固定しない（OS に任せる）
+    std::vector<int> cpus;
+    e.cpu_error.clear();
+    if (!cpu::select_cpus(e.opt.cpu_affinity, e.opt.physical_only, e.topo, cpus, e.cpu_error)) cpus.clear();
+    e.opt.cpus = cpus;
+
     const int want = std::max(0, e.opt.threads - 1);  // 探索スレッドは main（driver）＋ helper
-    if (e.pool_size != want) {
-        e.pool.reset(new search::ThreadPool(want));
+    if (e.pool_size != want || e.pool_cpus != cpus) {
+        e.pool.reset(new search::ThreadPool(want, cpus));
         e.pool_size = want;
+        e.pool_cpus = cpus;
     }
+}
+
+// isready の後の CPU の情報（§E2.4）。物理コア数と、固定に使う CPU を出す
+std::string cpu_info_line(const Engine& e) {
+    std::ostringstream out;
+    out << "info string Nuenagon cpu: logical=" << e.topo.logical << " physical=" << e.topo.physical
+        << " threads=" << e.opt.threads << " affinity=" << e.opt.cpu_affinity
+        << " physical_only=" << (e.opt.physical_only ? "true" : "false") << " cpus=";
+    if (e.opt.cpus.empty()) out << "none";
+    for (size_t i = 0; i < e.opt.cpus.size(); i++) out << (i ? "," : "") << e.opt.cpus[i];
+    if (!e.cpu_error.empty()) out << " warning: " << e.cpu_error;
+    if (e.pool && e.pool->pin_failures() > 0) {
+        out << " warning: 固定に失敗したスレッドが " << e.pool->pin_failures() << " 個（OS に任せる）";
+    }
+    return out.str();
 }
 
 // go <引数…>（§E2.1）。ジョブ番号0として起動する
@@ -411,7 +437,7 @@ void cmd_bench(Engine& e, const EvalState& ev, std::istringstream& in) {
     search::Options o = e.opt;
     o.threads = std::clamp(threads, 1, 256);
     o.deterministic = false;
-    std::unique_ptr<search::ThreadPool> bench_pool(new search::ThreadPool(o.threads - 1));
+    std::unique_ptr<search::ThreadPool> bench_pool(new search::ThreadPool(o.threads - 1, o.cpus));
     e.tt.clear();
     const search::EvalRef ref{&ev.net, ev.scale};
 
@@ -476,11 +502,10 @@ int main() {
         }
         else if (cmd == "isready") {
             eng.stop_job();
-            cmd_isready(game, ev);
-            if (ev.loaded) {
+            if (cmd_isready(game, ev)) {
                 apply_config(eng);
-                reply("info string Nuenagon cpu: logical=" + std::to_string(std::thread::hardware_concurrency()) +
-                      " threads=" + std::to_string(eng.opt.threads) + " affinity=" + eng.opt.cpu_affinity);
+                reply(cpu_info_line(eng));
+                reply("readyok");
             }
         }
         else if (cmd == "usinewgame") {

@@ -48,8 +48,9 @@ struct Options {
     bool deterministic = false;   // §E5.9：1スレッド・ノード数制限
     bool debug_check = false;     // §E3.4
     bool usi_ponder = false;
-    std::string cpu_affinity = "auto";  // 受け付けて覚えておくだけ（実際の割り当ては N5）
-    bool physical_only = false;         // 同上（UsePhysicalCoresOnly）
+    std::string cpu_affinity = "auto";  // CpuAffinity（"auto" または論理CPUの一覧。§E2.4）
+    bool physical_only = false;         // UsePhysicalCoresOnly（§E2.4）
+    std::vector<int> cpus;              // 探索スレッドを固定する論理CPU（空なら固定しない。main が決めて渡す）
 };
 
 // 評価に使う重み（nullptr なら評価できない）
@@ -116,21 +117,26 @@ private:
 };
 
 // スレッドプール（§E5.2）。探索スレッドを起動時に作り、ジョブの作業（ヘルパー）を受け付ける。
+// cpus があれば、ワーカーは cpus[(番号+1) % 個数] の論理CPUに固定する（番号 0 は駆動スレッドの CPU）。
 class ThreadPool {
 public:
-    explicit ThreadPool(int n);
+    explicit ThreadPool(int n, std::vector<int> cpus = {});
     ~ThreadPool();
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
     int size() const { return (int)workers_.size(); }
+    int pin_failures() const { return pin_failures_.load(); }  // 固定に失敗したワーカーの数
     void submit(std::function<void()> task);
 private:
-    void loop();
+    void loop(int index);
+    std::vector<int> cpus_;
     std::vector<std::thread> workers_;
     std::deque<std::function<void()>> tasks_;
     std::mutex mu_;
     std::condition_variable cv_;
     bool quit_ = false;
+    int started_ = 0;                   // 固定を済ませたワーカーの数（mu_ で守る）
+    std::atomic<int> pin_failures_{0};
 };
 
 // 出来事と情報の出力先（USI の info 行を1行ずつ渡す）
