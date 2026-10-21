@@ -13,6 +13,7 @@ endif()
 add_executable(nuenagon
   src/main.cpp
   src/board/game.cpp
+  src/eval/raypair/raypair.cpp
 )
 target_include_directories(nuenagon PRIVATE src)
 
