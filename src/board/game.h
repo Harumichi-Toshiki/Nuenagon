@@ -1,9 +1,11 @@
-// 局面（盤面と履歴）。指し手は Board::push_move / undo_move で進める・戻す（差分更新）。
+// 局面（盤面と履歴）。指し手は Game::push / pop で進める・戻す（差分更新）。パス（null move）は push_null / pop。
 // 履歴は千日手の判定に使う。探索（N4）でも、この進める・戻す処理をそのまま使う。
+// 重み（Network）を設定しているときは、第1層の蓄積値も同じ処理で差分更新し、戻すときはスタックから戻す。
 #pragma once
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "eval/raypair/network.h"
 #include "shogi_utils.h"
 
 enum class Repetition { None, Draw, Win, Lose, Superior, Inferior };
@@ -17,6 +19,7 @@ struct HistoryEntry {
     int turn;            // 手番
     bool in_check;       // 手番側が王手されているか
     int hand[2][8];      // 持ち駒 [色][駒種]（駒種は 1..7）
+    bool is_null;        // null move を指した後の局面
 };
 
 class Game {
@@ -25,12 +28,24 @@ public:
 
     Game();
 
+    void set_network(const raypair::Network* net);  // 評価に使う重み（nullptr なら評価なし）。蓄積値を作り直す
+    bool has_network() const { return net_ != nullptr; }
+
     void set_startpos();
     void set_sfen(const std::string& sfen);  // 履歴は作り直す
     bool push_usi(const std::string& usi);   // 合法手と照合してから進める。違法なら false
     void push(const Move& m);                // 指し手を1手進め、履歴に積む
-    void pop();                              // 直前の手を戻し、履歴から外す
+    void push_null();                        // 手番だけを入れ替える（null move。千日手の判定では手に数えない）
+    void pop();                              // 直前の手（null を含む）を戻し、履歴から外す。手が無ければ何もしない
+    int ply_count() const { return (int)plies_.size(); }
+    std::string last_move_usi() const;       // 直前の手（"null"、手が無ければ "none"）
     std::vector<std::string> legal_moves_usi() const;
+    std::vector<Move> legal_moves() const;
+
+    // 現在の第1層の蓄積値（重みを設定しているときだけ使える）
+    const raypair::Accumulator& accumulator() const { return acc_.back(); }
+    // 差分で保っている蓄積値が、全計算と一致するか（§E3.4）
+    bool accumulator_matches_full() const;
 
     // 今の局面の千日手の状態（判定の決まりは cshogi の Board.is_draw() と同じ）
     Repetition repetition() const;
@@ -39,9 +54,13 @@ private:
     struct Ply {
         Move move;
         StateInfo state;
+        bool is_null;
     };
     std::vector<Ply> plies_;
     std::vector<HistoryEntry> history_;  // history_.size() == plies_.size() + 1
+    Board start_;                        // 履歴の先頭の局面（重みを設定し直すときに使う）
+    const raypair::Network* net_ = nullptr;
+    std::vector<raypair::Accumulator> acc_;  // 重みがあるとき acc_.size() == plies_.size() + 1。戻す用のスタック
 };
 
 // 指し手生成の数え上げ（perft）。board は差分更新で進めて戻す。
