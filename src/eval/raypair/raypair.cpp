@@ -50,6 +50,14 @@ void append_piece_features(const ViewBoard& vb, std::vector<int>& out) {
     }
 }
 
+int piece_feature(int pc, int sq) {
+    return kA1Base + pc * 81 + sq;
+}
+
+int hand_feature(int side, int h, int k) {
+    return kA2Base + side * 38 + kHandOff[h] + k;
+}
+
 void append_hand_features(const ViewBoard& vb, std::vector<int>& out) {
     for (int side = 0; side < 2; side++) {
         for (int h = 0; h < 7; h++) {
