@@ -1,24 +1,30 @@
-// Nuenagon の標準入出力の窓口（N1〜N3 の範囲）。命令を1行ずつ読み、応答を1行ずつ返す。
+// Nuenagon の標準入出力の窓口。命令を1行ずつ読み、応答を1行ずつ返す（N1〜N3 の命令＋N4 の USI）。
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 #include "board/game.h"
 #include "eval/raypair/network.h"
 #include "eval/raypair/raypair.h"
 #include "mate/dfpn.h"
+#include "search/search.h"
 
 namespace {
 
 std::atomic<bool> g_searching{true};
+std::mutex g_out_mu;  // 探索のスレッドからも出力するため
 
 void reply(const std::string& s) {
+    std::lock_guard<std::mutex> lk(g_out_mu);
     std::cout << s << std::endl;  // 1行ごとに必ず流す
 }
 
@@ -102,23 +108,37 @@ void cmd_position(Game& game, std::istringstream& in) {
 }
 
 // setoption name <名前> value <値>（§E2.3）。応答はない
-void cmd_setoption(EvalState& ev, std::istringstream& in) {
+void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) {
     std::string tok, name, value;
     in >> tok >> name;  // "name" <名前>
     in >> tok;          // "value"
     std::getline(in, value);
     value.erase(0, value.find_first_not_of(' '));
     value.erase(value.find_last_not_of(" \r") + 1);
+    auto as_int = [&value](int def) {
+        try { return std::stoi(value); } catch (...) { return def; }
+    };
     if (name == "EvalFile") {
         ev.file = value;
         ev.file_set = true;
     }
     else if (name == "EvalScale") {
-        try { ev.scale_option = std::stoi(value); } catch (...) { ev.scale_option = 0; }
+        ev.scale_option = std::max(0, as_int(0));
     }
     else if (name == "DebugCheckAccumulator") {
         ev.debug_check = (value == "true");
+        opt.debug_check = ev.debug_check;
     }
+    else if (name == "Threads") opt.threads = std::clamp(as_int(4), 1, 256);
+    else if (name == "USI_Hash") opt.hash_mb = std::clamp(as_int(256), 1, 65536);
+    else if (name == "MultiPV") opt.multipv = std::clamp(as_int(1), 1, 500);
+    else if (name == "MaxPly") opt.max_ply = std::clamp(as_int(0), 0, 10000);
+    else if (name == "DrawValue") opt.draw_value = std::clamp(as_int(0), -1000, 1000);
+    else if (name == "NetworkDelay") opt.network_delay = std::clamp(as_int(120), 0, 10000);
+    else if (name == "USI_Ponder") opt.usi_ponder = (value == "true");
+    else if (name == "Deterministic") opt.deterministic = (value == "true");
+    else if (name == "CpuAffinity") opt.cpu_affinity = value;     // 受け付けて覚えるだけ（N5 で使う）
+    else if (name == "UsePhysicalCoresOnly") opt.physical_only = (value == "true");
 }
 
 // isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする
@@ -283,6 +303,137 @@ void cmd_evalbench(Game& game, const EvalState& ev, std::istringstream& in) {
     reply(out.str());
 }
 
+// ---------- 探索（§E2、§E5）----------
+
+// 探索の状態。ジョブは専用のスレッド（driver）で動き、bestmove はそのスレッドから出す。
+// 同時に動かすのは1つ（main の go）。ジョブの仕組み自体は複数のジョブに対応している（§E5.2）。
+struct Engine {
+    search::Options opt;
+    search::TranspositionTable tt;
+    search::HintTable hints;
+    std::unique_ptr<search::ThreadPool> pool;
+    int pool_size = -1;
+    int tt_mb = -1;
+    std::shared_ptr<search::Job> job;
+    std::thread driver;
+
+    // 動いているジョブを止めて、終わるまで待つ
+    void stop_job() {
+        if (job) job->stop();
+        wait_job();
+    }
+    // 動いているジョブが終わるまで待つ（止めない）
+    void wait_job() {
+        if (driver.joinable()) driver.join();
+        job.reset();
+    }
+    ~Engine() { stop_job(); }
+};
+
+// 置換表とスレッドプールを、設定（Threads・USI_Hash）に合わせる。ジョブが無いときに呼ぶ
+void apply_config(Engine& e) {
+    if (e.tt_mb != e.opt.hash_mb) {
+        e.tt.resize(e.opt.hash_mb);
+        e.tt_mb = e.opt.hash_mb;
+    }
+    const int want = std::max(0, e.opt.threads - 1);  // 探索スレッドは main（driver）＋ helper
+    if (e.pool_size != want) {
+        e.pool.reset(new search::ThreadPool(want));
+        e.pool_size = want;
+    }
+}
+
+// go <引数…>（§E2.1）。ジョブ番号0として起動する
+void cmd_go(Engine& e, const EvalState& ev, const Game& game, std::istringstream& in) {
+    e.stop_job();
+    search::Limits lim;
+    auto num = [&in]() {
+        long long v = 0;
+        in >> v;
+        return v;
+    };
+    std::string tok;
+    bool in_moves = false;
+    while (in >> tok) {
+        if (tok == "searchmoves") in_moves = true;
+        else if (tok == "ponder") { lim.ponder = true; in_moves = false; }
+        else if (tok == "infinite") { lim.infinite = true; in_moves = false; }
+        else if (tok == "btime") { lim.btime = num(); in_moves = false; }
+        else if (tok == "wtime") { lim.wtime = num(); in_moves = false; }
+        else if (tok == "binc") { lim.binc = num(); in_moves = false; }
+        else if (tok == "winc") { lim.winc = num(); in_moves = false; }
+        else if (tok == "byoyomi") { lim.byoyomi = num(); in_moves = false; }
+        else if (tok == "movetime") { lim.movetime = num(); in_moves = false; }
+        else if (tok == "nodes") { lim.nodes = num(); in_moves = false; }
+        else if (tok == "depth") { lim.depth = (int)num(); in_moves = false; }
+        else if (tok == "mate") { num(); in_moves = false; }
+        else if (in_moves) lim.searchmoves.push_back(tok);
+    }
+
+    // 重みが無いときも落ちず、bestmove を返す（§E2、テスト）
+    if (!ev.loaded) {
+        reply("info string eval not loaded");
+        const std::vector<Move> moves = game.legal_moves();
+        reply(moves.empty() ? "bestmove resign" : "bestmove " + move_to_usi(moves[0]));
+        return;
+    }
+
+    apply_config(e);
+    e.tt.new_generation();  // 世代を進める（§E5.3）
+    const search::EvalRef ref{&ev.net, ev.scale};
+    auto job = std::make_shared<search::Job>(game, lim, e.opt, ref, e.tt, e.pool.get(), &e.hints, false,
+                                             [](const std::string& s) { reply(s); });
+    e.job = job;
+    e.driver = std::thread([job] {
+        job->run();
+        std::string line = "bestmove " + job->best_move();
+        if (!job->ponder_move().empty()) line += " ponder " + job->ponder_move();
+        reply(line);
+    });
+}
+
+// bench [スレッド数]：固定の局面群を深さ6で探索した合計のノード数と NPS（§E6-10）
+void cmd_bench(Engine& e, const EvalState& ev, std::istringstream& in) {
+    e.stop_job();
+    int threads = 1;
+    in >> threads;
+    if (!ev.loaded) {
+        reply("bench nodes 0 nps 0");
+        return;
+    }
+    static const char* kPositions[] = {
+        "",
+        "7g7f 3c3d 2g2f 8c8d",
+        "7g7f 8c8d 2g2f 3c3d 2f2e 2b2c",
+        "2g2f 8c8d 7g7f 3c3d 6i7h 4a3b",
+    };
+    search::Options o = e.opt;
+    o.threads = std::clamp(threads, 1, 256);
+    o.deterministic = false;
+    std::unique_ptr<search::ThreadPool> bench_pool(new search::ThreadPool(o.threads - 1));
+    e.tt.clear();
+    const search::EvalRef ref{&ev.net, ev.scale};
+
+    long long nodes = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (const char* mv : kPositions) {
+        Game g;
+        g.set_network(&ev.net);
+        g.set_startpos();
+        std::istringstream ms(mv);
+        std::string u;
+        while (ms >> u) g.push_usi(u);
+        search::Limits lim;
+        lim.depth = 6;
+        search::Job job(g, lim, o, ref, e.tt, bench_pool.get(), nullptr, false, nullptr);
+        job.run();
+        nodes += job.nodes();
+    }
+    const long long ms = std::max<long long>(1, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                    std::chrono::steady_clock::now() - t0).count());
+    reply("bench nodes " + std::to_string(nodes) + " nps " + std::to_string(nodes * 1000 / ms));
+}
+
 }  // namespace
 
 int main() {
@@ -291,6 +442,7 @@ int main() {
 
     Game game;
     EvalState ev;
+    Engine eng;
     DfpnSearcher mate_search(&g_searching);
 
     std::string line;
@@ -302,18 +454,56 @@ int main() {
         if (cmd == "usi") {
             reply("id name Nuenagon");
             reply("id author Harumichi-Toshiki");
+            reply("option name Threads type spin default 4 min 1 max 256");
+            reply("option name CpuAffinity type string default auto");
+            reply("option name UsePhysicalCoresOnly type check default false");
+            reply("option name USI_Hash type spin default 256 min 1 max 65536");
             reply("option name EvalFile type string default eval/nuenagon.shk");
             reply("option name EvalScale type spin default 0 min 0 max 10000");
+            reply("option name NetworkDelay type spin default 120 min 0 max 10000");
+            reply("option name USI_Ponder type check default false");
+            reply("option name MaxPly type spin default 0 min 0 max 10000");
+            reply("option name DrawValue type spin default 0 min -1000 max 1000");
+            reply("option name MultiPV type spin default 1 min 1 max 500");
+            reply("option name Deterministic type check default false");
             reply("option name DebugCheckAccumulator type check default false");
             reply("usiok");
         }
         else if (cmd == "setoption") {
-            cmd_setoption(ev, in);
+            eng.stop_job();
+            cmd_setoption(ev, eng.opt, in);
         }
         else if (cmd == "isready") {
+            eng.stop_job();
             cmd_isready(game, ev);
+            if (ev.loaded) {
+                apply_config(eng);
+                reply("info string Nuenagon cpu: logical=" + std::to_string(std::thread::hardware_concurrency()) +
+                      " threads=" + std::to_string(eng.opt.threads) + " affinity=" + eng.opt.cpu_affinity);
+            }
+        }
+        else if (cmd == "usinewgame") {
+            eng.stop_job();
+            eng.tt.clear();   // 新しい対局：置換表と、ヒントの表を消す（§E5.3、§E5.5）
+            eng.hints.clear();
+        }
+        else if (cmd == "go") {
+            cmd_go(eng, ev, game, in);
+        }
+        else if (cmd == "stop") {
+            if (eng.job) eng.job->stop();  // bestmove は探索のスレッドが出す
+        }
+        else if (cmd == "ponderhit") {
+            if (eng.job) eng.job->ponder_hit();
+        }
+        else if (cmd == "gameover") {
+            eng.stop_job();
+        }
+        else if (cmd == "bench") {
+            cmd_bench(eng, ev, in);
         }
         else if (cmd == "position") {
+            eng.stop_job();
             cmd_position(game, in);
             debug_check(game, ev);
         }
@@ -379,11 +569,13 @@ int main() {
             reply(found ? "mate " + mate_search.get_best_mate() : "mate none");
         }
         else if (cmd == "quit") {
+            eng.stop_job();
             break;
         }
         else if (!cmd.empty()) {
             reply("info string unknown command " + cmd);  // 知らない命令は無視する
         }
     }
+    eng.wait_job();  // 入力が終わったときは、動いている探索を終わるまで待つ
     return 0;
 }

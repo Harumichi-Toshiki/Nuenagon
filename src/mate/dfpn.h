@@ -25,6 +25,7 @@ private:
     std::atomic<bool>* searching_flag;
     bool abort_search = false;
     std::string best_mate_move = "";
+    int mate_length = 0;
     long long node_count = 0;
 
 public:
@@ -40,9 +41,12 @@ public:
     }
 
     std::string get_best_mate() const { return best_mate_move; }
+    // 見つけた詰みの読み筋の長さ（手番側の初手から、手の数）。見つからなければ 0（N4 の根の詰み探索で使う）
+    int get_mate_length() const { return mate_length; }
 
     bool search_mate(const Board& root_board) {
         best_mate_move = "";
+        mate_length = 0;
         node_count = 0;
         abort_search = false;
 
@@ -60,6 +64,7 @@ public:
             std::vector<std::string> pv = get_mate_pv(root_board);
             if (!pv.empty()) {
                 best_mate_move = pv[0];
+                mate_length = (int)pv.size();
             }
             else {
                 // ★追加：ハッシュ衝突でPVが途切れた場合の強力なフォールバック
