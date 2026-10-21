@@ -29,6 +29,10 @@ ViewBoard make_view(const Board& board, int persp);
 void append_piece_features(const ViewBoard& vb, std::vector<int>& out);  // A1
 void append_hand_features(const ViewBoard& vb, std::vector<int>& out);   // A2
 
+// A1・A2 の1個ぶんの特徴のインデックス（N3 の差分更新で使う）
+int piece_feature(int pc, int sq);         // 駒番号 pc（0..27）が視点座標 sq にある
+int hand_feature(int side, int h, int k);  // 持ち駒。side は 0 = 視点側、1 = 相手側。k は 0..（枚数−1）
+
 // version：0 = v0、1 = v1（領域付き）。line は 0..51
 void append_line_b1(const ViewBoard& vb, int version, int line, std::vector<int>& out);
 
