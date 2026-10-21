@@ -3,6 +3,7 @@
 #include <string>
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include "board/shogi_utils.h"
 #include "board/zobrist.h"
 
@@ -27,17 +28,23 @@ private:
     std::string best_mate_move = "";
     int mate_length = 0;
     long long node_count = 0;
+    int tt_size = DFPN_TT_SIZE;  // この探索の表の大きさ（インスタンスごと。共有の変数は書き換えない）
+    long long deadline_ms = 0;   // 締め切り（std::chrono::steady_clock のミリ秒）。0 は無し
 
 public:
     long long max_nodes = 10000000;
     void set_searching_flag(std::atomic<bool>* flag) { searching_flag = flag; }
     void set_max_nodes(long long limit) { max_nodes = limit; }
+    // 締め切り（steady_clock のミリ秒）。過ぎたら探索を打ち切る（詰みが見つからなかった扱い）
+    void set_deadline_ms(long long ms) { deadline_ms = ms; }
     void resize_hash() {
         tt.clear();
-        tt.resize(DFPN_TT_SIZE);
+        tt.resize(tt_size);
     }
-    DfpnSearcher(std::atomic<bool>* flag) : searching_flag(flag) {
-        tt.resize(DFPN_TT_SIZE);
+    DfpnSearcher(std::atomic<bool>* flag) : DfpnSearcher(flag, DFPN_TT_SIZE) {}
+    // table_size は 2 のべき乗。小さい表で足りる探索（N4.1 の根の詰み探索）に使う
+    DfpnSearcher(std::atomic<bool>* flag, int table_size) : searching_flag(flag), tt_size(table_size) {
+        tt.resize(tt_size);
     }
 
     std::string get_best_mate() const { return best_mate_move; }
@@ -58,7 +65,7 @@ public:
         Board temp_root = root_board;
         mid(temp_root, true, DFPN_INF, DFPN_INF, 0, path_keys);
 
-        int root_idx = root_key & (DFPN_TT_SIZE - 1);
+        int root_idx = root_key & (tt_size - 1);
         if (tt[root_idx].key == root_key && tt[root_idx].pn == 0) {
             // 1. まず通常のPV復元を試みる
             std::vector<std::string> pv = get_mate_pv(root_board);
@@ -71,7 +78,7 @@ public:
                 // rootノードの展開済み手の中から、pn == 0 (詰み) となっている子ノードを直接探し出す
                 for (size_t i = 0; i < tt[root_idx].moves.size(); ++i) {
                     uint64_t ck = tt[root_idx].child_keys[i];
-                    int c_idx = ck & (DFPN_TT_SIZE - 1);
+                    int c_idx = ck & (tt_size - 1);
                     if (tt[c_idx].key == ck && tt[c_idx].pn == 0) {
                         best_mate_move = move_to_usi(tt[root_idx].moves[i]);
                         break;
@@ -85,7 +92,7 @@ public:
     }
 
     void clear() {
-        for (size_t i = 0; i < DFPN_TT_SIZE; ++i) {
+        for (size_t i = 0; i < (size_t)tt_size; ++i) {
             tt[i].key = 0;
             tt[i].is_expanded = false;
             // メモリを完全に解放する Swap Trick
@@ -101,7 +108,7 @@ public:
 
         for (int depth = 0; depth < 100; ++depth) {
             uint64_t key = temp_board.get_zobrist_key();
-            int idx = key & (DFPN_TT_SIZE - 1);
+            int idx = key & (tt_size - 1);
             if (tt[idx].key != key || tt[idx].pn != 0) break;
 
             int best_c = -1;
@@ -109,7 +116,7 @@ public:
                 int min_len = 999999;
                 for (size_t i = 0; i < tt[idx].moves.size(); ++i) {
                     uint64_t ck = tt[idx].child_keys[i];
-                    int c_idx = ck & (DFPN_TT_SIZE - 1);
+                    int c_idx = ck & (tt_size - 1);
                     if (tt[c_idx].key == ck && tt[c_idx].pn == 0) {
                         if (tt[c_idx].mate_length < min_len) { min_len = tt[c_idx].mate_length; best_c = (int)i; }
                     }
@@ -119,7 +126,7 @@ public:
                 int max_len = -1;
                 for (size_t i = 0; i < tt[idx].moves.size(); ++i) {
                     uint64_t ck = tt[idx].child_keys[i];
-                    int c_idx = ck & (DFPN_TT_SIZE - 1);
+                    int c_idx = ck & (tt_size - 1);
                     if (tt[c_idx].key == ck && tt[c_idx].pn == 0) {
                         if (tt[c_idx].mate_length > max_len) { max_len = tt[c_idx].mate_length; best_c = (int)i; }
                     }
@@ -141,9 +148,16 @@ private:
     void mid(Board& board, bool is_or_node, int pn_th, int dn_th, int depth, std::vector<uint64_t>& path_keys) {
         if (!searching_flag->load() || abort_search) return;
         if (++node_count > max_nodes || depth > 200) { abort_search = true; return; }
+        // 締め切り（N4.1）：1024 ノードごとに時計を見る
+        if (deadline_ms > 0 && (node_count & 1023) == 0 &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count() >= deadline_ms) {
+            abort_search = true;
+            return;
+        }
 
         uint64_t key = board.get_zobrist_key();
-        int idx = key & (DFPN_TT_SIZE - 1);
+        int idx = key & (tt_size - 1);
 
         // ノードの展開
         if (tt[idx].key != key || !tt[idx].is_expanded) {
@@ -182,7 +196,7 @@ private:
                 uint64_t child_key = tt[idx].child_keys[i];
                 // ★修正：ループ検出時に即座にPN/DNを返し、無限ループを回避
                 bool is_loop = (std::find(path_keys.begin(), path_keys.end(), child_key) != path_keys.end());
-                int c_idx = child_key & (DFPN_TT_SIZE - 1);
+                int c_idx = child_key & (tt_size - 1);
                 int c_pn = is_loop ? DFPN_INF : ((tt[c_idx].key == child_key) ? tt[c_idx].pn : 1);
                 int c_dn = is_loop ? 0 : ((tt[c_idx].key == child_key) ? tt[c_idx].dn : 1);
 
@@ -206,7 +220,7 @@ private:
                 if (is_or_node) {
                     int m_len = 999999;
                     for (size_t i = 0; i < tt[idx].moves.size(); ++i) {
-                        int ci = tt[idx].child_keys[i] & (DFPN_TT_SIZE - 1);
+                        int ci = tt[idx].child_keys[i] & (tt_size - 1);
                         if (tt[ci].key == tt[idx].child_keys[i] && tt[ci].pn == 0) m_len = (std::min)(m_len, tt[ci].mate_length);
                     }
                     tt[idx].mate_length = m_len + 1;
@@ -214,7 +228,7 @@ private:
                 else {
                     int m_len = -1;
                     for (size_t i = 0; i < tt[idx].moves.size(); ++i) {
-                        int ci = tt[idx].child_keys[i] & (DFPN_TT_SIZE - 1);
+                        int ci = tt[idx].child_keys[i] & (tt_size - 1);
                         if (tt[ci].key == tt[idx].child_keys[i] && tt[ci].pn == 0) m_len = (std::max)(m_len, tt[ci].mate_length);
                     }
                     tt[idx].mate_length = m_len + 1;
@@ -225,7 +239,7 @@ private:
 
             int next_pn_th, next_dn_th;
             uint64_t best_key = tt[idx].child_keys[best_c];
-            int b_idx = best_key & (DFPN_TT_SIZE - 1);
+            int b_idx = best_key & (tt_size - 1);
             int b_pn = (tt[b_idx].key == best_key) ? tt[b_idx].pn : 1;
             int b_dn = (tt[b_idx].key == best_key) ? tt[b_idx].dn : 1;
 
