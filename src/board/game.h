@@ -56,11 +56,14 @@ private:
         StateInfo state;
         bool is_null;
     };
+    void refresh_views();                // 両視点の盤面を、今の盤から作り直す（重みがあるときだけ）
     std::vector<Ply> plies_;
     std::vector<HistoryEntry> history_;  // history_.size() == plies_.size() + 1
     Board start_;                        // 履歴の先頭の局面（重みを設定し直すときに使う）
     const raypair::Network* net_ = nullptr;
     std::vector<raypair::Accumulator> acc_;  // 重みがあるとき acc_.size() == plies_.size() + 1。戻す用のスタック
+    // 両視点の盤面（差分更新の元）。指す・戻すたびに、変わったマスと持ち駒だけを写す（§E3.2）
+    raypair::ViewBoard view_[2];
 };
 
 // 指し手生成の数え上げ（perft）。board は差分更新で進めて戻す。

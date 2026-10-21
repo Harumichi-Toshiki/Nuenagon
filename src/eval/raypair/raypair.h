@@ -26,6 +26,18 @@ struct ViewBoard {
 // persp：0 = 先手視点、1 = 後手視点
 ViewBoard make_view(const Board& board, int persp);
 
+// 1手で変わったもの（視点座標）。差分更新（§E3.2）の入力
+struct ViewDelta {
+    int n = 0;           // 変わったマスの数（駒打ちは1、盤上の手は2）
+    int sq[2];           // 変わったマス（視点座標）
+    int pre_pc[2];       // その指す前の駒番号（空は -1）
+    int pre_hand[2][7];  // 指す前の持ち駒（ViewBoard::hand と同じ添字）
+};
+
+// 盤面座標 sqs（n 個。-1 は無視）のマスを、board の今の駒で視点 persp の vb に写す。
+// d が null でなければ、写す前の値（変わったマスの駒と、持ち駒）を d に書く。
+void set_view_squares(ViewBoard& vb, int persp, const Board& board, const int* sqs, int n, ViewDelta* d);
+
 void append_piece_features(const ViewBoard& vb, std::vector<int>& out);  // A1
 void append_hand_features(const ViewBoard& vb, std::vector<int>& out);   // A2
 
@@ -37,6 +49,12 @@ int hand_feature(int side, int h, int k);  // 持ち駒。side は 0 = 視点側
 void append_line_b1(const ViewBoard& vb, int version, int line, std::vector<int>& out);
 
 void append_knight_features(const ViewBoard& vb, int version, std::vector<int>& out);  // B2
+
+// B1・B2 の1個ぶんの特徴のインデックス（差分更新で使う。append_line_b1・append_knight_features と同じ式）
+// lo_sq・hi_sq は視点座標のマス（lo が走査で先の方）、pc_lo・pc_hi はその駒番号
+int b1_feature(int version, int axis, int lo_sq, int pc_lo, int hi_sq, int pc_hi);
+// s は 0（視点側の桂）／1（相手側の桂）、lr は 0（x−1）／1（x+1）、pc_target は跳び先の駒番号
+int knight_feature(int version, int s, int pc_target, int lr);
 
 // 全計算（両視点ぶんは呼び出し側で2回呼ぶ）。out は作り直し、昇順に並べて返す。
 void compute_features(const Board& board, int persp, int version, std::vector<int>& out);
