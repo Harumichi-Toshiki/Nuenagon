@@ -217,7 +217,7 @@ namespace {
 class Worker {
 public:
     Worker(Job::Shared& sh, const Game& root, int id)
-        : sh_(sh), game_(root), id_(id), history_(2 * kHistSize * 81, 0) {
+        : sh_(sh), game_(root), id_(id), history_(2 * kHistSize * 81, 0), buf_(new MoveBuf[kMaxPly + 1]) {
         std::memset(killers_, 0, sizeof killers_);
         std::memset(pv_len_, 0, sizeof pv_len_);
         pv_.assign(kMaxPly * kMaxPly, Move{});
@@ -247,6 +247,12 @@ public:
     int id_;
     long long pending_ = 0;          // まだ共有カウンタに足していないノード数
     int seldepth_ = 0;
+    // 指し手の一覧と、並べ替えの点数の作業領域（ノードの深さごと。確保は作るときだけ）
+    struct MoveBuf {
+        Move moves[MAX_LEGAL_MOVES];
+        int score[MAX_LEGAL_MOVES];
+    };
+    std::unique_ptr<MoveBuf[]> buf_;
     Move killers_[kMaxPly][2];
     std::vector<int> history_;       // [手番][履歴の添字][到達マス]
     std::vector<Move> pv_;           // 三角の読み筋 [ply][i]
@@ -343,7 +349,7 @@ int Worker::qsearch(int alpha, int beta, int ply, int qd) {
     if (ply > seldepth_) seldepth_ = ply;
     if (ply >= kMaxPly - 1) return evaluate();
 
-    const bool in_check = game_.board.in_check(game_.board.turn);
+    const bool in_check = game_.in_check_now();
     if ((in_check && qd > kQCheckLimit) || qd > kQLimit) return evaluate();
 
     // 置換表（静止探索の結果も深さ0として保存する。N4.1）
@@ -358,33 +364,37 @@ int Worker::qsearch(int alpha, int beta, int ply, int qd) {
     }
 
     int best;
-    std::vector<Move> moves;
+    MoveBuf& mb = buf_[ply];
+    Move* moves = mb.moves;
+    int* score = mb.score;
+    int n = 0;
     if (!in_check) {
         const int stand = evaluate();
         if (stand >= beta) return stand;
         if (stand > alpha) alpha = stand;
         best = stand;
-        for (const Move& m : game_.legal_moves()) {
+        const int all = (int)(game_.gen_legal(moves) - moves);
+        for (int i = 0; i < all; i++) {
+            const Move m = moves[i];
             if (!is_capture(game_.board, m)) continue;
             const int victim = kPieceValue[game_.board.pieces[m.to] & 15];
             const int attacker = kPieceValue[game_.board.pieces[m.from] & 15];
             // 損な取り（安い駒を高い駒で取って、そのマスに取り返される）は読まない
             if (victim < attacker && game_.board.is_attacked(m.to, 1 - game_.board.turn)) continue;
             if (stand + victim * 3 / 2 + 200 <= alpha) continue;  // delta pruning
-            moves.push_back(m);
+            moves[n++] = m;
         }
     }
     else {
-        moves = game_.legal_moves();
-        if (moves.empty()) return -(kMate - ply);
+        n = (int)(game_.gen_legal(moves) - moves);
+        if (n == 0) return -(kMate - ply);
         best = -kInf;
     }
 
-    std::vector<int> score(moves.size());
-    for (size_t i = 0; i < moves.size(); i++) score[i] = order_score(moves[i], Move{}, false, ply, nullptr);
-    for (size_t i = 0; i < moves.size(); i++) {
-        size_t bi = i;
-        for (size_t j = i + 1; j < moves.size(); j++) {
+    for (int i = 0; i < n; i++) score[i] = order_score(moves[i], Move{}, false, ply, nullptr);
+    for (int i = 0; i < n; i++) {
+        int bi = i;
+        for (int j = i + 1; j < n; j++) {
             if (score[j] > score[bi]) bi = j;
         }
         std::swap(moves[i], moves[bi]);
@@ -422,7 +432,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     if (depth <= 0 || ply >= kMaxPly - 1) return qsearch(alpha, beta, ply, 0);
 
     const bool pv_node = beta - alpha > 1;
-    const bool in_check = game_.board.in_check(game_.board.turn);
+    const bool in_check = game_.in_check_now();
     const uint64_t key = game_.board.zobrist_key;
 
     // 置換表
@@ -453,19 +463,21 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
         if (s >= beta) return s >= kMateBound ? beta : s;
     }
 
-    std::vector<Move> moves = game_.legal_moves();
-    if (moves.empty()) return -(kMate - ply);  // 手が無い＝負け（王手されていれば詰み）
+    MoveBuf& mb = buf_[ply];
+    Move* moves = mb.moves;
+    int* score = mb.score;
+    const int n = (int)(game_.gen_legal(moves) - moves);
+    if (n == 0) return -(kMate - ply);  // 手が無い＝負け（王手されていれば詰み）
 
-    std::vector<int> score(moves.size());
-    for (size_t i = 0; i < moves.size(); i++) score[i] = order_score(moves[i], tt_move, has_tt, ply, hint);
+    for (int i = 0; i < n; i++) score[i] = order_score(moves[i], tt_move, has_tt, ply, hint);
 
     const int alpha0 = alpha;
     int best = -kInf;
     Move best_move{};
     const int static_eval = (!pv_node && !in_check && depth <= 3) ? evaluate() : 0;
-    for (size_t i = 0; i < moves.size(); i++) {
-        size_t bi = i;
-        for (size_t j = i + 1; j < moves.size(); j++) {
+    for (int i = 0; i < n; i++) {
+        int bi = i;
+        for (int j = i + 1; j < n; j++) {
             if (score[j] > score[bi]) bi = j;
         }
         std::swap(moves[i], moves[bi]);
@@ -479,7 +491,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
         }
 
         game_.push(m);
-        const bool gives_check = game_.board.in_check(game_.board.turn);
+        const bool gives_check = game_.in_check_now();
         // 王手の延長はしない（N4.1）：持ち駒の多い局面では王手の手が多く、延長すると木が膨らむ
         const int nd = depth - 1;
 

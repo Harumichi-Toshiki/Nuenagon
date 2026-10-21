@@ -234,7 +234,18 @@ public:
     Bitboard targets(int color) const { return ~color_bb[color]; }
 
     struct Dir { int dx, dy; };
-    Bitboard get_slider_attacks(int sq, const std::vector<Dir>& dirs) const {
+    // 方向の並び（確保しない参照。std::vector を毎回作ると、利きの計算のたびに確保が起きる）
+    struct DirList {
+        const Dir* d;
+        int n;
+        const Dir* begin() const { return d; }
+        const Dir* end() const { return d + n; }
+    };
+    static constexpr Dir kDirsDiag[4] = { {-1, -1}, {1, -1}, {-1, 1}, {1, 1} };
+    static constexpr Dir kDirsOrtho[4] = { {0, -1}, {0, 1}, {-1, 0}, {1, 0} };
+    static constexpr Dir kDirDown[1] = { {0, 1} };
+    static constexpr Dir kDirUp[1] = { {0, -1} };
+    Bitboard get_slider_attacks(int sq, DirList dirs) const {
         Bitboard attacks;
         Bitboard occ = occupied();
         int kx = sq % 9;
@@ -313,16 +324,20 @@ public:
         if (KING_ATTACKS[sq] & prom_sliders & attackers) return true;
 
         // 4. 香車の利き（相手が先手なら上から降ってくるので、下(0, 1)に向かって光線を飛ばす）
-        std::vector<Dir> lance_dirs = (by_color == BLACK) ? std::vector<Dir>{{0, 1}} : std::vector<Dir>{ {0, -1} };
-        if (get_slider_attacks(sq, lance_dirs) & type_bb[LANCE] & attackers) return true;
+        // 飛び駒の種類ごとに、相手にその駒が無ければ利きは計算しない（結果は同じ）
+        const Bitboard lances = type_bb[LANCE] & attackers;
+        DirList lance_dirs = (by_color == BLACK) ? DirList{ kDirDown, 1 } : DirList{ kDirUp, 1 };
+        if (lances.is_not_empty() && (get_slider_attacks(sq, lance_dirs) & lances)) return true;
 
         // 5. 角・馬の斜めスライド利き
-        std::vector<Dir> bishop_dirs = { {-1, -1}, {1, -1}, {-1, 1}, {1, 1} };
-        if (get_slider_attacks(sq, bishop_dirs) & (type_bb[BISHOP] | type_bb[PROM_BISHOP]) & attackers) return true;
+        const Bitboard bishops = (type_bb[BISHOP] | type_bb[PROM_BISHOP]) & attackers;
+        DirList bishop_dirs{ kDirsDiag, 4 };
+        if (bishops.is_not_empty() && (get_slider_attacks(sq, bishop_dirs) & bishops)) return true;
 
         // 6. 飛・龍の上下左右スライド利き
-        std::vector<Dir> rook_dirs = { {0, -1}, {0, 1}, {-1, 0}, {1, 0} };
-        if (get_slider_attacks(sq, rook_dirs) & (type_bb[ROOK] | type_bb[PROM_ROOK]) & attackers) return true;
+        const Bitboard rooks = (type_bb[ROOK] | type_bb[PROM_ROOK]) & attackers;
+        DirList rook_dirs{ kDirsOrtho, 4 };
+        if (rooks.is_not_empty() && (get_slider_attacks(sq, rook_dirs) & rooks)) return true;
 
         return false;
     }
@@ -592,7 +607,7 @@ inline Move* generate_moves_simple(const Position& pos, Move* move_list) {
         }
     }
     Bitboard lances = pos.type_bb[LANCE] & pos.color_bb[us];
-    std::vector<Position::Dir> lance_dirs = (us == BLACK) ? std::vector<Position::Dir>{{0, -1}} : std::vector<Position::Dir>{ {0, 1} };
+    Position::DirList lance_dirs = (us == BLACK) ? Position::DirList{ Position::kDirUp, 1 } : Position::DirList{ Position::kDirDown, 1 };
     while (lances) {
         int from = lances.pop_lsb();
         Bitboard attacks = pos.get_slider_attacks(from, lance_dirs) & target_sq;
@@ -609,7 +624,7 @@ inline Move* generate_moves_simple(const Position& pos, Move* move_list) {
 
     // 【角と馬の移動】
     Bitboard bishops = (pos.type_bb[BISHOP] | pos.type_bb[PROM_BISHOP]) & pos.color_bb[us];
-    std::vector<Position::Dir> bishop_dirs = { {-1, -1}, {1, -1}, {-1, 1}, {1, 1} }; // 斜め4方向
+    Position::DirList bishop_dirs{ Position::kDirsDiag, 4 }; // 斜め4方向
     while (bishops) {
         int from = bishops.pop_lsb();
         Bitboard attacks = pos.get_slider_attacks(from, bishop_dirs);
@@ -633,7 +648,7 @@ inline Move* generate_moves_simple(const Position& pos, Move* move_list) {
 
     // 【飛車と龍の移動】
     Bitboard rooks = (pos.type_bb[ROOK] | pos.type_bb[PROM_ROOK]) & pos.color_bb[us];
-    std::vector<Position::Dir> rook_dirs = { {0, -1}, {0, 1}, {-1, 0}, {1, 0} }; // 上下左右
+    Position::DirList rook_dirs{ Position::kDirsOrtho, 4 }; // 上下左右
     while (rooks) {
         int from = rooks.pop_lsb();
         Bitboard attacks = pos.get_slider_attacks(from, rook_dirs);

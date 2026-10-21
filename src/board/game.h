@@ -41,11 +41,16 @@ public:
     std::string last_move_usi() const;       // 直前の手（"null"、手が無ければ "none"）
     std::vector<std::string> legal_moves_usi() const;
     std::vector<Move> legal_moves() const;
+    // 合法手を out に書き、その終わりを返す（out は MAX_LEGAL_MOVES 以上）。確保はしない
+    Move* gen_legal(Move* out) const { return generate_moves(board.bit_pos, out); }
 
     // 現在の第1層の蓄積値（重みを設定しているときだけ使える）
     const raypair::Accumulator& accumulator() const { return acc_.back(); }
     // 差分で保っている蓄積値が、全計算と一致するか（§E3.4）
     bool accumulator_matches_full() const;
+
+    // 今の局面で手番側が王手されているか（進めるときに求めた値を使う。board.in_check と同じ）
+    bool in_check_now() const { return history_.back().in_check; }
 
     // 今の局面の千日手の状態（判定の決まりは cshogi の Board.is_draw() と同じ）
     Repetition repetition() const;

@@ -222,26 +222,31 @@ void piece_and_hand_rows(const ViewBoard& post, const ViewDelta& d, Rows& r) {
 // B1：変わったマスを通るライン1本の組。組は、間に駒が無く隣り合う2つの駒（§F2.1）。
 // 指す前と指した後で、変わったマスを含む区間（両端の駒を含む）の組だけが変わる。
 // それ以外の区間の組は、両端と間の駒が変わらないので、指す前と後で同じ。
+// 1回の走査で、指す前（minus）と指した後（plus）の2つの列を追う。
 void b1_line_rows(const ViewBoard& post, const ViewDelta& d, int version, int line, Rows& r) {
     int sq[9];
     const int n = line_squares(line, sq);
     const int axis = axis_of_line(line);
-    for (int pass = 0; pass < 2; pass++) {  // 0：指す前の組を minus、1：指した後の組を plus
-        int prev = -1, prev_pc = -1;
-        bool changed_since = false;  // 直前の駒のマス（その駒を含む）から、今のマスまでに変わったマスがあるか
-        for (int i = 0; i < n; i++) {
-            const int s = sq[i];
-            changed_since = changed_since || is_changed(d, s);
-            const int pc = (pass == 0) ? pre_pc_at(post, d, s) : post.pc[s];
-            if (pc < 0) continue;
-            if (prev >= 0 && changed_since) {
-                const int f = b1_feature(version, axis, prev, prev_pc, s, pc);
-                if (pass == 0) r.minus[r.nm++] = f;
-                else r.plus[r.np++] = f;
-            }
-            prev = s;
-            prev_pc = pc;
-            changed_since = is_changed(d, s);
+    int pre_prev = -1, pre_prev_pc = -1;    // 指す前：直前の駒のマスと駒番号
+    int post_prev = -1, post_prev_pc = -1;  // 指した後
+    bool pre_changed = false, post_changed = false;  // 直前の駒（その駒を含む）から今のマスまでに変わったマスがあるか
+    for (int i = 0; i < n; i++) {
+        const int s = sq[i];
+        const bool ch = is_changed(d, s);
+        pre_changed = pre_changed || ch;
+        post_changed = post_changed || ch;
+        const int pre_pc = pre_pc_at(post, d, s), post_pc = post.pc[s];
+        if (pre_pc >= 0) {
+            if (pre_prev >= 0 && pre_changed) r.minus[r.nm++] = b1_feature(version, axis, pre_prev, pre_prev_pc, s, pre_pc);
+            pre_prev = s;
+            pre_prev_pc = pre_pc;
+            pre_changed = ch;
+        }
+        if (post_pc >= 0) {
+            if (post_prev >= 0 && post_changed) r.plus[r.np++] = b1_feature(version, axis, post_prev, post_prev_pc, s, post_pc);
+            post_prev = s;
+            post_prev_pc = post_pc;
+            post_changed = ch;
         }
     }
 }
