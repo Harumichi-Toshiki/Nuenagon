@@ -1,0 +1,155 @@
+diff -ruN nueb/src/search/search.cpp nuex/src/search/search.cpp
+--- nueb/src/search/search.cpp	2026-10-21 18:34:08.768869228 +0900
++++ nuex/src/search/search.cpp	2026-10-21 19:38:12.286322505 +0900
+@@ -8,6 +8,7 @@
+ #include <cstring>
+ #include <iostream>
+ #include <utility>
++#include <thread>
+ 
+ #include "eval/raypair/raypair.h"
+ #include "mate/dfpn.h"
+@@ -78,8 +79,8 @@
+ 
+ // USI の score 表記：詰みは手数（§E7）、それ以外は cp
+ std::string score_text(int s) {
+-    if (s >= kMateBound) return "mate " + std::to_string((kMate - s + 1) / 2);
+-    if (s <= -kMateBound) return "mate -" + std::to_string((kMate + s + 1) / 2);
++    if (s >= kMateBound) return "mate " + std::to_string(kMate - s);
++    if (s <= -kMateBound) return "mate -" + std::to_string(kMate + s);
+     return "cp " + std::to_string(s);
+ }
+ 
+@@ -346,15 +347,32 @@
+ 
+     const bool in_check = game_.board.in_check(game_.board.turn);
+     if ((in_check && qd > kQCheckLimit) || qd > kQLimit) return evaluate();
++    const uint64_t qkey = game_.board.zobrist_key;
++    const int qalpha0 = alpha;
++    {
++        TTEntry te;
++        if (sh_.tt->probe(qkey, te)) {
++            const int s = from_tt(te.score, ply);
++            if (te.bound == kExact || (te.bound == kLower && s >= beta) || (te.bound == kUpper && s <= alpha)) return s;
++        }
++    }
+     int best;
+     std::vector<Move> moves;
++    int stand_v = 0;
+     if (!in_check) {
+         const int stand = evaluate();
++        stand_v = stand;
+         if (stand >= beta) return stand;
+         if (stand > alpha) alpha = stand;
+         best = stand;
+         for (const Move& m : game_.legal_moves()) {
+-            if (is_capture(game_.board, m)) moves.push_back(m);
++            if (!is_capture(game_.board, m)) continue;
++            const int victim = kPieceValue[game_.board.pieces[m.to] & 15];
++            const int attacker = kPieceValue[game_.board.pieces[m.from] & 15];
++            // 損な取り（安い駒を高い駒で取って、取り返される）は読まない
++            if (victim < attacker && game_.board.is_attacked(m.to, 1 - game_.board.turn)) continue;
++            if (stand + victim * 3 / 2 + 200 <= alpha) continue;  // delta pruning
++            moves.push_back(m);
+         }
+     }
+     else {
+@@ -385,6 +403,7 @@
+             }
+         }
+     }
++    sh_.tt->store(qkey, 0, to_tt(best, ply), best >= beta ? kLower : (best > qalpha0 ? kExact : kUpper), Move{}, false);
+     return best;
+ }
+ 
+@@ -446,6 +465,7 @@
+     const int alpha0 = alpha;
+     int best = -kInf;
+     Move best_move{};
++    const int static_eval = (!pv_node && !in_check && depth <= 3) ? evaluate() : 0;
+     for (size_t i = 0; i < moves.size(); i++) {
+         size_t bi = i;
+         for (size_t j = i + 1; j < moves.size(); j++) {
+@@ -455,10 +475,15 @@
+         std::swap(score[i], score[bi]);
+         const Move m = moves[i];
+         const bool capture = is_capture(game_.board, m);
++        // 浅い深さの枝刈り（futility・move count）：静かな手だけ。最善が詰みの負けでないときだけ
++        if (!pv_node && !in_check && depth <= 3 && i > 0 && !capture && !m.is_promote && best > -kMateBound) {
++            if (static_eval + 250 * depth <= alpha) continue;
++            if ((int)i >= 6 + 3 * depth * depth) continue;
++        }
+ 
+         game_.push(m);
+         const bool gives_check = game_.board.in_check(game_.board.turn);
+-        const int ext = (exts < kMaxCheckExt && (in_check || gives_check)) ? 1 : 0;  // 王手の延長
++        const int ext = (exts < kMaxCheckExt && (false)) ? 1 : 0;  // 王手の延長
+         chk_ext_[ply + 1] = exts + ext;
+         const int nd = depth - 1 + ext;
+ 
+@@ -515,7 +540,7 @@
+         const long long nodes0 = total_nodes();
+         game_.push(m);
+         const bool gives_check = game_.board.in_check(game_.board.turn);
+-        const int ext = (in_check || gives_check) ? 1 : 0;  // 根の手の王手の延長
++        const int ext = in_check ? 1 : 0;  // 根の手の王手の延長
+         chk_ext_[1] = ext;
+         const int nd = depth - 1 + ext;
+ 
+@@ -754,9 +779,24 @@
+     // 根の詰み探索（§E5.7）：短い時間（ノード数）だけ詰みを探し、見つかればその手で終える
+     if (!null_root_ && !lim_.ponder && sh_.ev.net) {
+         std::atomic<bool> flag{true};
++        const int saved_size = DFPN_TT_SIZE;
++        DFPN_TT_SIZE = 1 << 16;  // 根の短い詰み探索には小さい表で足りる（大きい表は確保だけで数十ms）
+         DfpnSearcher mate(&flag);
+         mate.set_max_nodes(kMateProbeNodes);
+-        if (mate.search_mate(game.board)) {
++        // 詰み探索は持ち時間の1割まで（締め切りが無い探索では 200ms まで）
++        const long long dl0 = sh_.deadline_ms.load();
++        const long long mate_ms = dl0 > 0 ? std::max<long long>(1, (dl0 - now_ms()) / 10) : 200;
++        std::atomic<bool> done{false};
++        std::thread watchdog([&]() {
++            const long long until = now_ms() + mate_ms;
++            while (!done.load() && now_ms() < until && !sh_.stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
++            flag = false;
++        });
++        const bool found_mate = mate.search_mate(game.board);
++        DFPN_TT_SIZE = saved_size;
++        done = true;
++        watchdog.join();
++        if (found_mate) {
+             const std::string usi = mate.get_best_mate();
+             for (const RootMove& r : rm) {
+                 if (move_to_usi(r.move) != usi) continue;
+@@ -770,7 +810,7 @@
+                 best_move_ = usi;
+                 if (sh_.sink) {
+                     sh_.sink("info depth " + std::to_string(plies) + " seldepth " + std::to_string(plies) +
+-                             " score mate " + std::to_string((plies + 1) / 2) + " nodes 0 nps 0 time " +
++                             " score mate " + std::to_string(plies) + " nodes 0 nps 0 time " +
+                              std::to_string(std::max<long long>(1, now_ms() - start)) + " pv " + usi);
+                 }
+                 return;
+@@ -804,6 +844,21 @@
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+     }
+ 
++    // bestmove の直前の info（§E7）：最後に読み終えた深さの結果に、止めた時点の合計ノード数と時間を付けて出す
++    if (!result_.empty() && sh_.sink) {
++        const long long nodes = sh_.nodes.load();
++        const long long ms = std::max<long long>(1, now_ms() - start);
++        const int lines = std::min<int>(std::max(1, sh_.opt.multipv), (int)result_.size());
++        for (int k = 0; k < lines; k++) {
++            const RootMove& r = result_[k];
++            std::string line = "info depth " + std::to_string(std::max(1, r.depth)) + " seldepth " + std::to_string(std::max(r.depth, r.seldepth));
++            if (sh_.opt.multipv > 1) line += " multipv " + std::to_string(k + 1);
++            line += " score " + score_text(r.score) + " nodes " + std::to_string(nodes) + " nps " + std::to_string(nodes * 1000 / ms);
++            line += " time " + std::to_string(ms) + " hashfull " + std::to_string(sh_.tt->hashfull()) + " pv";
++            for (const Move& m : r.pv) line += " " + move_to_usi(m);
++            sh_.sink(line);
++        }
++    }
+     if (!result_.empty()) {
+         best_move_ = move_to_usi(result_[0].move);
+         if (sh_.opt.usi_ponder && result_[0].pv.size() >= 2) {

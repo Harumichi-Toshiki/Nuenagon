@@ -15,7 +15,10 @@ add_executable(nuenagon
   src/board/game.cpp
   src/eval/raypair/raypair.cpp
   src/eval/raypair/network.cpp
+  src/search/search.cpp
 )
+find_package(Threads REQUIRED)
+target_link_libraries(nuenagon PRIVATE Threads::Threads)
 target_include_directories(nuenagon PRIVATE src)
 
 if(MSVC)
