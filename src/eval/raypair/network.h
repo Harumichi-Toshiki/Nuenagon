@@ -5,6 +5,11 @@
 #include <vector>
 #include "eval/raypair/raypair.h"
 
+// AVX2 を使うか（CMake の NUENAGON_SIMD）。1 なら AVX2 のコード、0 なら SIMD を使わないコード。結果は同じ
+#ifndef NUENAGON_SIMD_AVX2
+#define NUENAGON_SIMD_AVX2 0
+#endif
+
 namespace raypair {
 
 constexpr int kW = 128;  // 第1層の幅 W（v0・v1 とも 128）

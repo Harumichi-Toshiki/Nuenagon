@@ -143,6 +143,7 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
 
 // isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする
 void cmd_isready(Game& game, EvalState& ev) {
+    reply(std::string("info string Nuenagon build: simd=") + (NUENAGON_SIMD_AVX2 ? "avx2" : "scalar"));
     if (!ev.file_set && !std::ifstream(ev.file).good()) {
         ev.loaded = false;
         game.set_network(nullptr);
