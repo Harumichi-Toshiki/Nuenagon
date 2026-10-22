@@ -716,8 +716,12 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
         const bool capture = is_capture(game_.board, m);
         const bool quiet = !capture && !m.is_promote;
 
+        // 王手になりうる手は枝刈りしない（王手で詰む手を、静かな手として刈らないため）
+        const int opp_k = game_.board.king_sq[1 - game_.board.turn];
+        const bool maybe_check = opp_k >= 0 && (near_line(m.to, opp_k % 9, opp_k / 9) ||
+                                                (!m.is_drop && near_line(m.from, opp_k % 9, opp_k / 9)));
         // 枝刈り（PV でなく王手を受けていない局面で、最初の合法手の後。最善が詰まされる値のときは読む）
-        if (prune_ok && legal > 0 && best > -kMateBound) {
+        if (prune_ok && legal > 0 && best > -kMateBound && !maybe_check) {
             if (quiet && depth <= 3 && static_eval + 250 * depth <= alpha) continue;  // futility（N4.1）
             if (quiet && o.search_lmp && depth <= 8 && legal >= (3 + depth * depth) / (improving ? 1 : 2)) continue;  // LMP
             if (quiet && !o.search_lmp && depth <= 3 && legal >= 6 + 3 * depth * depth) continue;  // 手の数（N4.1）
