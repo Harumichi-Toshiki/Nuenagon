@@ -649,7 +649,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     const bool prune_ok = !pv_node && !in_check;  // 枝刈りをしてよい節点（PV でなく、王手を受けていない）
 
     // razoring：浅い深さで評価が α を大きく下回るなら、静止探索で確かめて返す
-    if (o.search_razoring && prune_ok && depth <= 2 && static_eval + 300 * depth <= alpha) {
+    if (o.search_razoring && prune_ok && depth <= 2 && static_eval + o.search_razor_margin * depth <= alpha) {
         const int v = qsearch(alpha, alpha + 1, ply, 0);
         if (sh_.stop.load(std::memory_order_relaxed)) return 0;
         if (v <= alpha) return v;
@@ -657,7 +657,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
 
     // reverse futility（RFP）：評価が β を大きく超えているなら、浅い探索を省いてそのまま返す
     if (o.search_rfp && prune_ok && depth <= 7 && std::abs(beta) < kMateBound &&
-        static_eval - 80 * depth + (improving ? 60 : 0) >= beta) {
+        static_eval - o.search_rfp_margin * depth + (improving ? 60 : 0) >= beta) {
         return static_eval;
     }
 
@@ -689,7 +689,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     if (n == 0) return -(kMate - ply);  // 手が無い＝負け（王手されていれば詰み）
 
     // 1手詰め（§E11）：王手で詰む手があれば、その値を返す（TT には入れない）
-    if (o.search_mate1 && !in_check) {
+    if (o.search_mate1 && !in_check && depth >= 2) {
         Move mate{};
         if (find_mate1(moves, n, mate)) {
             if (pv_node) set_pv(ply, mate);
@@ -722,14 +722,15 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
                                                 (!m.is_drop && near_line(m.from, opp_k % 9, opp_k / 9)));
         // 枝刈り（PV でなく王手を受けていない局面で、最初の合法手の後。最善が詰まされる値のときは読む）
         if (prune_ok && legal > 0 && best > -kMateBound && !maybe_check) {
-            if (quiet && depth <= 3 && static_eval + 250 * depth <= alpha) continue;  // futility（N4.1）
-            if (quiet && o.search_lmp && depth <= 8 && legal >= (3 + depth * depth) / (improving ? 1 : 2)) continue;  // LMP
+            if (quiet && depth <= 3 && static_eval + o.search_futility_margin * depth <= alpha) continue;  // futility（N4.1）
+            if (quiet && o.search_lmp && depth <= 8 &&
+                legal >= o.search_lmp_scale * (3 + depth * depth) / (improving ? 1 : 2)) continue;  // LMP
             if (quiet && !o.search_lmp && depth <= 3 && legal >= 6 + 3 * depth * depth) continue;  // 手の数（N4.1）
             if (o.search_drop_prune && depth <= 2 && m.is_drop && quiet_drop_far(m)) continue;
             if (o.search_see_prune && depth <= 6) {
                 // 相手の利きが無いマスへの静かな手は、SEE が 0 なので調べない
                 const bool hit = capture || game_.board.is_attacked(m.to, 1 - game_.board.turn);
-                if (hit && see(m) < (capture ? -100 * depth : -40 * depth)) continue;
+                if (hit && see(m) < (capture ? -100 * depth : -o.search_see_margin * depth)) continue;
             }
         }
 

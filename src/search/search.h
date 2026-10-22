@@ -65,6 +65,13 @@ struct Options {
     bool search_iir = true;             // SearchIIR：置換表に手が無いとき、1手浅く読む
     bool search_improving = true;       // SearchImproving：評価値が2手前より上がっているかで、枝刈りを調整する
     bool search_razoring = true;        // SearchRazoring：浅い深さで評価値が α を大きく下回るとき、静止探索で返す
+
+    // 枝刈りの幅（USI の spin。持ち主が評価関数に合わせて調整する。点数は内部の単位。material_v0 は歩 約270点）
+    int search_rfp_margin = 180;        // SearchRFPMargin：RFP の深さ1あたりの余裕
+    int search_lmp_scale = 3;           // SearchLMPScale：LMP の手の数の係数（scale × (3 + 深さ²)）
+    int search_razor_margin = 300;      // SearchRazorMargin：razoring の深さ1あたりの余裕
+    int search_futility_margin = 250;   // SearchFutilityMargin：futility の深さ1あたりの余裕
+    int search_see_margin = 40;         // SearchSEEMargin：SEE 枝刈りの静かな手の閾値（深さ1あたり）
 };
 
 // 評価に使う重み（どちらも nullptr なら評価できない）。Game が持つのと同じ重みを指す

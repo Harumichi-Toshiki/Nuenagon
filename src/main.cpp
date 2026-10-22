@@ -43,6 +43,21 @@ struct SearchFlag {
     const char* name;
     bool search::Options::*field;
 };
+// 枝刈りの幅（USI の spin。名前は Search で始める）
+struct SearchSpin {
+    const char* name;
+    int search::Options::*field;
+    int min;
+    int max;
+};
+const SearchSpin kSearchSpins[] = {
+    {"SearchRFPMargin", &search::Options::search_rfp_margin, 0, 1000},
+    {"SearchLMPScale", &search::Options::search_lmp_scale, 1, 10},
+    {"SearchRazorMargin", &search::Options::search_razor_margin, 0, 1000},
+    {"SearchFutilityMargin", &search::Options::search_futility_margin, 0, 1000},
+    {"SearchSEEMargin", &search::Options::search_see_margin, 0, 500},
+};
+
 const SearchFlag kSearchFlags[] = {
     {"SearchLMRTable", &search::Options::search_lmr_table},
     {"SearchRFP", &search::Options::search_rfp},
@@ -187,6 +202,9 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
     else {
         for (const SearchFlag& f : kSearchFlags) {
             if (name == f.name) opt.*(f.field) = (value == "true");
+        }
+        for (const SearchSpin& s : kSearchSpins) {
+            if (name == s.name) opt.*(s.field) = std::clamp(as_int(0), s.min, s.max);
         }
     }
 }
@@ -586,6 +604,11 @@ int main() {
             for (const SearchFlag& f : kSearchFlags) {
                 reply(std::string("option name ") + f.name + " type check default " +
                       (search::Options{}.*(f.field) ? "true" : "false"));
+            }
+            for (const SearchSpin& s : kSearchSpins) {
+                reply(std::string("option name ") + s.name + " type spin default " +
+                      std::to_string(search::Options{}.*(s.field)) + " min " + std::to_string(s.min) +
+                      " max " + std::to_string(s.max));
             }
             reply("usiok");
         }

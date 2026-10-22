@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 build_scalar/
 build_dev/
+build_chk/
