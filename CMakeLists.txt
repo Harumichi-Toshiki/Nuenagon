@@ -17,6 +17,7 @@ add_executable(nuenagon
   src/eval/raypair/network.cpp
   src/search/search.cpp
   src/platform/cpu_affinity.cpp
+  src/eval/halfkp/halfkp.cpp
 )
 find_package(Threads REQUIRED)
 target_link_libraries(nuenagon PRIVATE Threads::Threads)

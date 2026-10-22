@@ -14,6 +14,7 @@
 #include <vector>
 #include "board/game.h"
 #include "eval/raypair/network.h"
+#include "eval/halfkp/halfkp.h"
 #include "eval/raypair/raypair.h"
 #include "mate/dfpn.h"
 #include "platform/cpu_affinity.h"
@@ -41,11 +42,31 @@ struct EvalState {
     std::string file = "eval/nuenagon.shk";  // EvalFile
     bool file_set = false;                   // EvalFile を明示的に指定したか
     int scale_option = 0;                    // EvalScale（0 ならファイルの値）
+    int fv_scale = 16;                       // FV_SCALE（HalfKP の評価値 = raw / FV_SCALE）
     bool debug_check = false;                // DebugCheckAccumulator
-    raypair::Network net;                    // 読み込んだ重み（loaded のとき）
+    raypair::Network net;                    // 読み込んだ RayPair の重み（loaded かつ !is_halfkp のとき）
+    halfkp::Network hk;                      // 読み込んだ HalfKP の重み（loaded かつ is_halfkp のとき）
+    bool is_halfkp = false;                  // 読み込んだのが HalfKP（nn.bin）か
     bool loaded = false;
-    double scale = 0;                        // 評価に使う eval_scale
+    double scale = 0;                        // 評価に使う eval_scale（RayPair）
 };
+
+// 評価に使う重みの参照（探索と bench で使う）
+search::EvalRef make_ref(const EvalState& ev) {
+    search::EvalRef r;
+    r.net = ev.is_halfkp ? nullptr : &ev.net;
+    r.scale = ev.scale;
+    r.hk = ev.is_halfkp ? &ev.hk : nullptr;
+    r.fv_scale = ev.fv_scale;
+    return r;
+}
+
+// Game に評価関数を設定する（読み込んだ種類に合わせる）
+void attach_eval(Game& g, const EvalState& ev) {
+    if (!ev.loaded) g.set_network(nullptr);
+    else if (ev.is_halfkp) g.set_halfkp(&ev.hk);
+    else g.set_network(&ev.net);
+}
 
 // features <v> <p> ／ linefeatures <v> <p> <L> ／ linesof <sq>（N2）。v：0 = v0、1 = v1。p：0 = 先手視点、1 = 後手視点
 void cmd_features(const Game& game, std::istringstream& in) {
@@ -126,6 +147,9 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
     else if (name == "EvalScale") {
         ev.scale_option = std::max(0, as_int(0));
     }
+    else if (name == "FV_SCALE") {
+        ev.fv_scale = std::clamp(as_int(16), 1, 128);
+    }
     else if (name == "DebugCheckAccumulator") {
         ev.debug_check = (value == "true");
         opt.debug_check = ev.debug_check;
@@ -142,6 +166,15 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
     else if (name == "UsePhysicalCoresOnly") opt.physical_only = (value == "true");
 }
 
+// ファイルの先頭4バイトが HalfKP（やねうら王の NNUE）の版なら true。開けなければ false（RayPair の読み込みで理由を出す）
+bool file_is_halfkp(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    unsigned char b[4] = {0, 0, 0, 0};
+    if (!f.read(reinterpret_cast<char*>(b), 4)) return false;
+    const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+    return v == halfkp::kMagic;
+}
+
 // isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする。
 // 準備できたら true を返す（readyok は呼び出し側が、CPU の情報の後に出す）。読み込みに失敗したら false
 bool cmd_isready(Game& game, EvalState& ev) {
@@ -150,6 +183,25 @@ bool cmd_isready(Game& game, EvalState& ev) {
         ev.loaded = false;
         game.set_network(nullptr);
         reply("info string eval: no weight file (" + ev.file + ")");
+        return true;
+    }
+    if (file_is_halfkp(ev.file)) {
+        // やねうら王の NNUE（HalfKP）。同じエンジンの中で、RayPair と切り替えて使える（§E10）
+        halfkp::Network hk;
+        std::string herr;
+        if (!halfkp::load_network(ev.file, hk, herr)) {
+            ev.loaded = false;
+            game.set_network(nullptr);
+            reply("info string eval load error: " + herr);
+            return false;
+        }
+        ev.hk = std::move(hk);
+        ev.is_halfkp = true;
+        ev.loaded = true;
+        game.set_halfkp(&ev.hk);
+        reply("info string Nuenagon eval: feature=HalfKP network=halfkp_256x2-32-32 W=" + std::to_string(halfkp::kW) +
+              " L1=" + std::to_string(halfkp::kL1) + " L2=" + std::to_string(halfkp::kL2) +
+              " fv_scale=" + std::to_string(ev.fv_scale));
         return true;
     }
     raypair::Network net;
@@ -161,6 +213,7 @@ bool cmd_isready(Game& game, EvalState& ev) {
         return false;
     }
     ev.net = std::move(net);
+    ev.is_halfkp = false;
     ev.loaded = true;
     ev.scale = ev.scale_option > 0 ? (double)(float)ev.scale_option : (double)ev.net.eval_scale;
     game.set_network(&ev.net);
@@ -188,8 +241,10 @@ void cmd_eval(const Game& game, const EvalState& ev) {
         reply("info string eval not loaded");
         return;
     }
-    int32_t raw = raypair::forward_raw(ev.net, game.accumulator(), game.board.turn);
-    reply("eval raw " + std::to_string(raw) + " cp " + std::to_string(raypair::cp_of(raw, ev.scale)));
+    const int32_t raw = game.raw_eval();
+    // HalfKP は raw / FV_SCALE を 0 の方へ切り捨てる（クリップしない）。RayPair は eval_scale で換算する
+    const long long cp = ev.is_halfkp ? (long long)(raw / ev.fv_scale) : raypair::cp_of(raw, ev.scale);
+    reply("eval raw " + std::to_string(raw) + " cp " + std::to_string(cp));
 }
 
 // acc <p> ／ accfull <p>：視点 p の蓄積値。acc は差分で保っている値、accfull は全計算
@@ -201,6 +256,15 @@ void cmd_acc(const Game& game, const EvalState& ev, std::istringstream& in, bool
     }
     if (!ev.loaded) {
         reply("info string eval not loaded");
+        return;
+    }
+    if (ev.is_halfkp) {
+        halfkp::Accumulator h;
+        if (full) halfkp::full_accumulator(ev.hk, game.board, h);
+        else h = game.halfkp_accumulator();
+        std::string hout = full ? "accfull" : "acc";
+        for (int j = 0; j < halfkp::kW; j++) hout += " " + std::to_string(h.v[p][j]);
+        reply(hout);
         return;
     }
     raypair::Accumulator a;
@@ -293,7 +357,7 @@ void cmd_evalbench(Game& game, const EvalState& ev, std::istringstream& in) {
     long long sum = 0;  // 最適化で評価を消されないように、結果を足して出す
     auto t0 = clock::now();
     for (long long i = 0; i < n; i++) {
-        sum += raypair::forward_raw(ev.net, game.accumulator(), game.board.turn);
+        sum += game.raw_eval();
     }
     auto t1 = clock::now();
     double eval_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
@@ -407,7 +471,7 @@ void cmd_go(Engine& e, const EvalState& ev, const Game& game, std::istringstream
 
     apply_config(e);
     e.tt.new_generation();  // 世代を進める（§E5.3）
-    const search::EvalRef ref{&ev.net, ev.scale};
+    const search::EvalRef ref = make_ref(ev);
     auto job = std::make_shared<search::Job>(game, lim, e.opt, ref, e.tt, e.pool.get(), &e.hints, false,
                                              [](const std::string& s) { reply(s); });
     e.job = job;
@@ -439,13 +503,13 @@ void cmd_bench(Engine& e, const EvalState& ev, std::istringstream& in) {
     o.deterministic = false;
     std::unique_ptr<search::ThreadPool> bench_pool(new search::ThreadPool(o.threads - 1, o.cpus));
     e.tt.clear();
-    const search::EvalRef ref{&ev.net, ev.scale};
+    const search::EvalRef ref = make_ref(ev);
 
     long long nodes = 0;
     const auto t0 = std::chrono::steady_clock::now();
     for (const char* mv : kPositions) {
         Game g;
-        g.set_network(&ev.net);
+        attach_eval(g, ev);
         g.set_startpos();
         std::istringstream ms(mv);
         std::string u;
@@ -487,6 +551,7 @@ int main() {
             reply("option name USI_Hash type spin default 256 min 1 max 65536");
             reply("option name EvalFile type string default eval/nuenagon.shk");
             reply("option name EvalScale type spin default 0 min 0 max 10000");
+            reply("option name FV_SCALE type spin default 16 min 1 max 128");
             reply("option name NetworkDelay type spin default 120 min 0 max 10000");
             reply("option name USI_Ponder type check default false");
             reply("option name MaxPly type spin default 0 min 0 max 10000");

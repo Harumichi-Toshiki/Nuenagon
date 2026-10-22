@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 #include "board/game.h"
+#include "eval/halfkp/halfkp.h"
 #include "eval/raypair/network.h"
 
 namespace search {
@@ -53,10 +54,12 @@ struct Options {
     std::vector<int> cpus;              // 探索スレッドを固定する論理CPU（空なら固定しない。main が決めて渡す）
 };
 
-// 評価に使う重み（nullptr なら評価できない）
+// 評価に使う重み（どちらも nullptr なら評価できない）。Game が持つのと同じ重みを指す
 struct EvalRef {
-    const raypair::Network* net = nullptr;
-    double scale = 0;  // eval_scale
+    const raypair::Network* net = nullptr;  // RayPair
+    double scale = 0;                       // RayPair の eval_scale
+    const halfkp::Network* hk = nullptr;    // HalfKP（§E10）
+    int fv_scale = 16;                      // HalfKP の FV_SCALE（評価値 = raw / fv_scale）
 };
 
 // ルートの手ごとの記録（§E5.4）

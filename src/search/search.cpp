@@ -287,7 +287,7 @@ bool Worker::aborted() {
         return true;
     }
     // §E3.4：差分更新の蓄積値を全計算と比べる
-    if (sh_.opt.debug_check && sh_.ev.net && !game_.accumulator_matches_full()) {
+    if (sh_.opt.debug_check && (sh_.ev.net || sh_.ev.hk) && !game_.accumulator_matches_full()) {
         if (sh_.sink) {
             sh_.sink("info string accumulator mismatch " + game_.board.to_sfen_key() + " " + game_.last_move_usi());
         }
@@ -298,8 +298,9 @@ bool Worker::aborted() {
 }
 
 int Worker::evaluate() const {
-    const int32_t raw = raypair::forward_raw(*sh_.ev.net, game_.accumulator(), game_.board.turn);
-    long long cp = raypair::cp_of(raw, sh_.ev.scale);
+    const int32_t raw = game_.raw_eval();
+    // HalfKP は raw を FV_SCALE で割って 0 の方へ切り捨てる（§E10）。RayPair は eval_scale で換算する
+    long long cp = sh_.ev.hk ? (long long)(raw / sh_.ev.fv_scale) : raypair::cp_of(raw, sh_.ev.scale);
     cp = std::max<long long>(-kMateCp, std::min<long long>(kMateCp, cp));
     return (int)cp;
 }
@@ -806,7 +807,7 @@ void Job::run() {
     best_move_ = move_to_usi(rm[0].move);
 
     // 根の詰み探索（§E5.7）：短い時間（ノード数）だけ詰みを探し、見つかればその手で終える
-    if (!null_root_ && !lim_.ponder && sh_.ev.net) {
+    if (!null_root_ && !lim_.ponder && (sh_.ev.net || sh_.ev.hk)) {
         DfpnSearcher mate(&searching_, kMateProbeTableSize);  // 表はこの探索専用（共有の変数は使わない）
         mate.set_max_nodes(kMateProbeNodes);
         // 詰み探索は持ち時間の1割まで（締め切りが無い探索では 200ms まで）。決定的モードでは時間で止めない（§E5.9）
