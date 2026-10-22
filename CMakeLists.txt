@@ -16,10 +16,27 @@ add_executable(nuenagon
   src/eval/raypair/raypair.cpp
   src/eval/raypair/network.cpp
   src/search/search.cpp
+  src/platform/cpu_affinity.cpp
+  src/platform/file_util.cpp
+  src/eval/halfkp/halfkp.cpp
 )
 find_package(Threads REQUIRED)
 target_link_libraries(nuenagon PRIVATE Threads::Threads)
 target_include_directories(nuenagon PRIVATE src)
+
+# SIMD（AVX2）を使うか。ON なら AVX2 のコードを使い、OFF なら SIMD を使わない、どの x86-64 でも動くコードにする。
+# 結果は両方で同じになる（tests/test_n5_acceptance.py が確かめる）。
+option(NUENAGON_SIMD "AVX2 を使う（OFF なら SIMD を使わない）" ON)
+if(NUENAGON_SIMD)
+  target_compile_definitions(nuenagon PRIVATE NUENAGON_SIMD_AVX2=1)
+  if(MSVC)
+    target_compile_options(nuenagon PRIVATE /arch:AVX2)
+  else()
+    target_compile_options(nuenagon PRIVATE -mavx2)
+  endif()
+else()
+  target_compile_definitions(nuenagon PRIVATE NUENAGON_SIMD_AVX2=0)
+endif()
 
 if(MSVC)
   target_compile_options(nuenagon PRIVATE /utf-8 /W3)

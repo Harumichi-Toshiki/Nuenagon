@@ -1,9 +1,13 @@
 // 重みファイルの読み込みと量子化、差分更新、推論（設計書 §F4・§E3・§E4）。
+#include "platform/file_util.h"
 #include "network.h"
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#if NUENAGON_SIMD_AVX2
+#include <immintrin.h>
+#endif
 
 namespace raypair {
 namespace {
@@ -83,12 +87,11 @@ private:
 }  // namespace
 
 bool load_network(const std::string& path, Network& net, std::string& err) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
+    std::vector<uint8_t> d;
+    if (!platform::read_whole_file(path, d)) {
         err = "ファイルを開けない: " + path;
         return false;
     }
-    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 
     if (d.size() < kHeaderSize + 4) { err = "短すぎる"; return false; }
     if (std::memcmp(d.data(), "SHIKIBU\0", 8) != 0) { err = "マジックが違う"; return false; }
@@ -171,47 +174,205 @@ void full_accumulator(const Network& net, const Board& board, Accumulator& acc) 
     }
 }
 
-void update_accumulator(const Network& net, int p, const ViewBoard& pre, const ViewBoard& post, Accumulator& acc) {
-    // 駒が変わったマス（移動元・移動先・取られた駒のマス）。引く特徴と足す特徴を集める
-    std::vector<int> minus, plus;
-    bool line_hit[kLines] = {};
-    for (int sq = 0; sq < 81; sq++) {
-        if (pre.pc[sq] == post.pc[sq]) continue;
-        if (pre.pc[sq] >= 0) minus.push_back(piece_feature(pre.pc[sq], sq));    // A1
-        if (post.pc[sq] >= 0) plus.push_back(piece_feature(post.pc[sq], sq));
-        for (int k = 0; k < 4; k++) line_hit[kLinesOf.line[sq][k]] = true;  // B1 の対象（重複は1回）
+namespace {
+
+// 1視点の1手で変わる特徴の一覧（§E3.2）。引く特徴（minus）と足す特徴（plus）。固定の大きさで、確保はしない。
+// 1手の上限：A1 ≤ 2、A2 ≤ 1、B1 は変わったマスを通る最大 8 本のラインに、それぞれ最大 8 組（指す前と後で各々）、
+// B2 は変わったマスの最大 10 候補に、各 2 個（指す前と後で各々）。どちらも 160 で足りる。
+constexpr int kRowCap = 160;
+struct Rows {
+    int minus[kRowCap];
+    int plus[kRowCap];
+    int nm = 0, np = 0;
+};
+
+// 指す前の駒番号。変わったマスは d の値、それ以外は今の盤（変わっていないので同じ）
+int pre_pc_at(const ViewBoard& post, const ViewDelta& d, int sq) {
+    for (int i = 0; i < d.n; i++) {
+        if (d.sq[i] == sq) return d.pre_pc[i];
     }
-    // A2：持ち駒の枚数が a → b のとき、b > a なら k = a..b−1 を足し、b < a なら k = b..a−1 を引く
+    return post.pc[sq];
+}
+
+bool is_changed(const ViewDelta& d, int sq) {
+    for (int i = 0; i < d.n; i++) {
+        if (d.sq[i] == sq) return true;
+    }
+    return false;
+}
+
+// A1・A2：変わったマスの駒と、持ち駒の枚数の変化
+void piece_and_hand_rows(const ViewBoard& post, const ViewDelta& d, Rows& r) {
+    for (int i = 0; i < d.n; i++) {
+        const int sq = d.sq[i];
+        const int pre = d.pre_pc[i], now = post.pc[sq];
+        if (pre == now) continue;
+        if (pre >= 0) r.minus[r.nm++] = piece_feature(pre, sq);
+        if (now >= 0) r.plus[r.np++] = piece_feature(now, sq);
+    }
     for (int side = 0; side < 2; side++) {
         for (int h = 0; h < 7; h++) {
-            int a = pre.hand[side][h], b = post.hand[side][h];
-            for (int k = a; k < b; k++) plus.push_back(hand_feature(side, h, k));
-            for (int k = b; k < a; k++) minus.push_back(hand_feature(side, h, k));
+            const int a = d.pre_hand[side][h], b = post.hand[side][h];
+            for (int k = a; k < b; k++) r.plus[r.np++] = hand_feature(side, h, k);
+            for (int k = b; k < a; k++) r.minus[r.nm++] = hand_feature(side, h, k);
         }
     }
-    // B1：対象のラインは、指す前の盤面の特徴を全部引き、指した後の盤面の特徴を全部足す
-    for (int line = 0; line < kLines; line++) {
-        if (!line_hit[line]) continue;
-        append_line_b1(pre, net.version, line, minus);
-        append_line_b1(post, net.version, line, plus);
-    }
-    // B2：桂の利きは、指す前の全部を引き、指した後の全部を足す
-    append_knight_features(pre, net.version, minus);
-    append_knight_features(post, net.version, plus);
+}
 
-    for (int i : minus) {
-        const int16_t* row = &net.ft_weight[(size_t)i * kW];
-        for (int j = 0; j < kW; j++) acc.v[p][j] = (int16_t)(acc.v[p][j] - row[j]);
+// B1：変わったマスを通るライン1本の組。組は、間に駒が無く隣り合う2つの駒（§F2.1）。
+// 指す前と指した後で、変わったマスを含む区間（両端の駒を含む）の組だけが変わる。
+// それ以外の区間の組は、両端と間の駒が変わらないので、指す前と後で同じ。
+// 1回の走査で、指す前（minus）と指した後（plus）の2つの列を追う。
+void b1_line_rows(const ViewBoard& post, const ViewDelta& d, int version, int line, Rows& r) {
+    const int* sq = kLineTable.sq[line];
+    const int n = kLineTable.n[line];
+    const int axis = kLineTable.axis[line];
+    int pre_prev = -1, pre_prev_pc = -1;    // 指す前：直前の駒のマスと駒番号
+    int post_prev = -1, post_prev_pc = -1;  // 指した後
+    bool pre_changed = false, post_changed = false;  // 直前の駒（その駒を含む）から今のマスまでに変わったマスがあるか
+    for (int i = 0; i < n; i++) {
+        const int s = sq[i];
+        const bool ch = is_changed(d, s);
+        pre_changed = pre_changed || ch;
+        post_changed = post_changed || ch;
+        const int pre_pc = pre_pc_at(post, d, s), post_pc = post.pc[s];
+        if (pre_pc >= 0) {
+            if (pre_prev >= 0 && pre_changed) r.minus[r.nm++] = b1_feature(version, axis, pre_prev, pre_prev_pc, s, pre_pc);
+            pre_prev = s;
+            pre_prev_pc = pre_pc;
+            pre_changed = ch;
+        }
+        if (post_pc >= 0) {
+            if (post_prev >= 0 && post_changed) r.plus[r.np++] = b1_feature(version, axis, post_prev, post_prev_pc, s, post_pc);
+            post_prev = s;
+            post_prev_pc = post_pc;
+            post_changed = ch;
+        }
     }
-    for (int i : plus) {
-        const int16_t* row = &net.ft_weight[(size_t)i * kW];
-        for (int j = 0; j < kW; j++) acc.v[p][j] = (int16_t)(acc.v[p][j] + row[j]);
+}
+
+// B2：桂1枚の利き（指す前なら before = true）。append_knight_features と同じ規則
+void knight_rows(int version, const ViewBoard& post, const ViewDelta& d, int sq, bool before, Rows& r) {
+    const int pc = before ? pre_pc_at(post, d, sq) : post.pc[sq];
+    if (pc != 2 && pc != 16) return;  // 成っていない桂。2 は視点側、16 は相手側
+    const int s = (pc == 2) ? 0 : 1;
+    const int y = sq / 9, x = sq % 9;
+    const int ty = (s == 0) ? y - 2 : y + 2;
+    if (ty < 0 || ty > 8) return;
+    for (int lr = 0; lr < 2; lr++) {
+        const int tx = (lr == 0) ? x - 1 : x + 1;
+        if (tx < 0 || tx > 8) continue;
+        const int target = before ? pre_pc_at(post, d, ty * 9 + tx) : post.pc[ty * 9 + tx];
+        if (target < 0) continue;
+        const int f = knight_feature(version, s, target, lr);
+        if (before) r.minus[r.nm++] = f;
+        else r.plus[r.np++] = f;
     }
+}
+
+// B2：利きが変わり得る桂は、変わったマス自身と、変わったマスに飛べる（桂の跳び方の位置の）マス。
+// それ以外の桂は、自分のマスも跳び先も変わらないので、指す前と後で同じ。
+void knight_delta_rows(int version, const ViewBoard& post, const ViewDelta& d, Rows& r) {
+    int cand[10];
+    int nc = 0;
+    auto add = [&](int s) {
+        for (int i = 0; i < nc; i++) {
+            if (cand[i] == s) return;
+        }
+        cand[nc++] = s;
+    };
+    for (int i = 0; i < d.n; i++) {
+        const int c = d.sq[i];
+        add(c);
+        const int y = c / 9, x = c % 9;
+        for (int dy = -2; dy <= 2; dy += 4) {
+            for (int dx = -1; dx <= 1; dx += 2) {
+                const int ny = y + dy, nx = x + dx;
+                if (ny >= 0 && ny <= 8 && nx >= 0 && nx <= 8) add(ny * 9 + nx);
+            }
+        }
+    }
+    for (int i = 0; i < nc; i++) {
+        knight_rows(version, post, d, cand[i], true, r);
+        knight_rows(version, post, d, cand[i], false, r);
+    }
+}
+
+// 蓄積値 v（W 個）に、minus の行を引き、plus の行を足す。int16 の足し引きは mod 2^16 なので、順序によらず同じ結果
+void apply_rows(int16_t* v, const int16_t* ft, const Rows& r) {
+#if NUENAGON_SIMD_AVX2
+    // 蓄積値の 128 要素を ymm レジスタ 8 本に載せたまま、全部の行を足し引きして、最後に1回だけ書き戻す
+    __m256i a[8];
+    for (int k = 0; k < 8; k++) a[k] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 16 * k));
+    for (int t = 0; t < r.nm; t++) {
+        const __m256i* row = reinterpret_cast<const __m256i*>(ft + (size_t)r.minus[t] * kW);
+        for (int k = 0; k < 8; k++) a[k] = _mm256_sub_epi16(a[k], _mm256_loadu_si256(row + k));
+    }
+    for (int t = 0; t < r.np; t++) {
+        const __m256i* row = reinterpret_cast<const __m256i*>(ft + (size_t)r.plus[t] * kW);
+        for (int k = 0; k < 8; k++) a[k] = _mm256_add_epi16(a[k], _mm256_loadu_si256(row + k));
+    }
+    for (int k = 0; k < 8; k++) _mm256_storeu_si256(reinterpret_cast<__m256i*>(v + 16 * k), a[k]);
+#else
+    for (int t = 0; t < r.nm; t++) {
+        const int16_t* row = ft + (size_t)r.minus[t] * kW;
+        for (int j = 0; j < kW; j++) v[j] = (int16_t)(v[j] - row[j]);
+    }
+    for (int t = 0; t < r.np; t++) {
+        const int16_t* row = ft + (size_t)r.plus[t] * kW;
+        for (int j = 0; j < kW; j++) v[j] = (int16_t)(v[j] + row[j]);
+    }
+#endif
+}
+
+// x（uint8）と w（int8）の内積。n は 32 の倍数。積の和は int32 で足す（両版で同じ値）
+int32_t dot_u8_s8(const uint8_t* x, const int8_t* w, int n) {
+#if NUENAGON_SIMD_AVX2
+    // maddubs の 2 つの積の和は |和| ≤ 2 × 127 × 127 = 32,258 で、int16 に収まる（飽和しない）
+    __m256i sum = _mm256_setzero_si256();
+    const __m256i ones = _mm256_set1_epi16(1);
+    for (int k = 0; k < n; k += 32) {
+        const __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x + k));
+        const __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w + k));
+        sum = _mm256_add_epi32(sum, _mm256_madd_epi16(_mm256_maddubs_epi16(a, b), ones));
+    }
+    int32_t t[8];
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(t), sum);
+    return t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
+#else
+    int32_t s = 0;
+    for (int k = 0; k < n; k++) s += (int32_t)x[k] * (int32_t)w[k];
+    return s;
+#endif
+}
+
+}  // namespace
+
+void update_accumulator(const Network& net, int p, const ViewBoard& post, const ViewDelta& d, Accumulator& acc) {
+    Rows r;
+    piece_and_hand_rows(post, d, r);
+
+    // B1：変わったマスを通るラインは、高々 8 本（マス2つ × 4 軸）。同じラインは1回だけ
+    int lines[8];
+    int nl = 0;
+    for (int i = 0; i < d.n; i++) {
+        for (int k = 0; k < 4; k++) {
+            const int line = kLinesOf.line[d.sq[i]][k];
+            bool seen = false;
+            for (int j = 0; j < nl; j++) seen = seen || (lines[j] == line);
+            if (!seen) lines[nl++] = line;
+        }
+    }
+    for (int j = 0; j < nl; j++) b1_line_rows(post, d, net.version, lines[j], r);
+
+    knight_delta_rows(net.version, post, d, r);
+
+    apply_rows(acc.v[p], net.ft_weight.data(), r);
 }
 
 int32_t forward_raw(const Network& net, const Accumulator& acc, int stm) {
     // 手番側を先に連結し、clamp(0, 127) で uint8 にする
-    uint8_t x[2 * kW];
+    alignas(32) uint8_t x[2 * kW];
     for (int j = 0; j < kW; j++) {
         int a = acc.v[stm][j], b = acc.v[1 - stm][j];
         x[j] = (uint8_t)(a < 0 ? 0 : (a > 127 ? 127 : a));
@@ -222,9 +383,7 @@ int32_t forward_raw(const Network& net, const Accumulator& acc, int stm) {
     const int L1 = net.L1, L2 = net.L2;
     int32_t h1[32], h2[32];
     for (int j = 0; j < L1; j++) {
-        int32_t s = net.l1_bias[j];
-        const int8_t* row = &net.l1_weight[(size_t)j * 2 * kW];
-        for (int k = 0; k < 2 * kW; k++) s += (int32_t)row[k] * x[k];
+        int32_t s = net.l1_bias[j] + dot_u8_s8(x, &net.l1_weight[(size_t)j * 2 * kW], 2 * kW);
         s >>= 6;
         h1[j] = s < 0 ? 0 : (s > 127 ? 127 : s);
     }

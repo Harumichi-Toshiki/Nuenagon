@@ -44,6 +44,55 @@ ViewBoard make_view(const Board& board, int persp) {
     return vb;
 }
 
+namespace {
+
+// 盤面の駒（Board::pieces の値）→ 視点 persp の駒番号。空は -1（make_view と同じ式）
+int pc_of_piece(int piece, int persp) {
+    if (piece == 0) return -1;
+    const int owner = (piece & 16) ? WHITE : BLACK;
+    return kPcOfType[piece & 15] + (owner == persp ? 0 : 14);
+}
+
+}  // namespace
+
+void set_view_squares(ViewBoard& vb, int persp, const Board& board, const int* sqs, int n, ViewDelta* d) {
+    if (d) {
+        d->n = 0;
+        for (int h = 0; h < 7; h++) {
+            d->pre_hand[0][h] = vb.hand[0][h];
+            d->pre_hand[1][h] = vb.hand[1][h];
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        if (sqs[i] < 0) continue;
+        const int vsq = (persp == BLACK) ? sqs[i] : 80 - sqs[i];  // make_view と同じ向き
+        if (d) {
+            d->sq[d->n] = vsq;
+            d->pre_pc[d->n] = vb.pc[vsq];
+            d->n++;
+        }
+        vb.pc[vsq] = pc_of_piece(board.pieces[sqs[i]], persp);
+    }
+    for (int h = 0; h < 7; h++) {
+        vb.hand[0][h] = board.hand[persp][h + 1];
+        vb.hand[1][h] = board.hand[1 - persp][h + 1];
+    }
+}
+
+int b1_feature(int version, int axis, int lo_sq, int pc_lo, int hi_sq, int pc_hi) {
+    const int ya = lo_sq / 9, xa = lo_sq % 9;
+    const int yb = hi_sq / 9, xb = hi_sq % 9;
+    const int d = (axis == 1) ? xb - xa : yb - ya;
+    const int local = pc_lo * 448 + pc_hi * 16 + axis * 4 + db_of(d);
+    const int region = (version == 0) ? 0 : (ya / 3) * 3 + (xa / 3);
+    return kB1Base + region * kB1Local + local;
+}
+
+int knight_feature(int version, int s, int pc_target, int lr) {
+    const int base = kB1Base + (version == 0 ? 1 : 9) * kB1Local;
+    return base + s * 56 + pc_target * 2 + lr;
+}
+
 void append_piece_features(const ViewBoard& vb, std::vector<int>& out) {
     for (int sq = 0; sq < 81; sq++) {
         if (vb.pc[sq] >= 0) out.push_back(kA1Base + vb.pc[sq] * 81 + sq);
@@ -145,6 +194,15 @@ int line_squares(int line, int* out) {
         break;
     }
     return n;
+}
+
+LineTable make_line_table() {
+    LineTable t{};
+    for (int line = 0; line < kLines; line++) {
+        t.axis[line] = axis_of_line(line);
+        t.n[line] = line_squares(line, t.sq[line]);
+    }
+    return t;
 }
 
 }  // namespace raypair

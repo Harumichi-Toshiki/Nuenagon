@@ -45,16 +45,45 @@ void Game::set_network(const raypair::Network* net) {
     // 蓄積値は重みに依存するので、開始局面から指し手を進め直して作り直す
     std::vector<Ply> old = plies_;
     net_ = net;
+    hk_ = nullptr;
+    replay_from_start(old);
+}
+
+void Game::set_halfkp(const halfkp::Network* net) {
+    std::vector<Ply> old = plies_;
+    hk_ = net;
+    net_ = nullptr;
+    replay_from_start(old);
+}
+
+void Game::replay_from_start(const std::vector<Ply>& plies) {
     board = start_;
-    plies_.clear();
+    this->plies_.clear();
     history_.clear();
     history_.push_back(make_entry(board, false));
-    acc_.clear();
-    if (net_) acc_.push_back(full_of(*net_, board));
-    for (const Ply& p : old) {
+    init_accumulators();
+    for (const Ply& p : plies) {
         if (p.is_null) push_null();
         else push(p.move);
     }
+}
+
+void Game::init_accumulators() {
+    acc_.clear();
+    hacc_.clear();
+    if (net_) acc_.push_back(full_of(*net_, board));
+    if (hk_) {
+        halfkp::Accumulator a;
+        halfkp::full_accumulator(*hk_, board, a);
+        hacc_.push_back(a);
+    }
+    refresh_views();
+}
+
+int32_t Game::raw_eval() const {
+    if (hk_) return halfkp::forward_raw(*hk_, hacc_.back(), board.turn);
+    if (!net_) return 0;
+    return raypair::forward_raw(*net_, acc_.back(), board.turn);
 }
 
 void Game::set_startpos() {
@@ -67,24 +96,33 @@ void Game::set_sfen(const std::string& sfen) {
     plies_.clear();
     history_.clear();
     history_.push_back(make_entry(board, false));
-    acc_.clear();
-    if (net_) acc_.push_back(full_of(*net_, board));
+    init_accumulators();
+}
+
+void Game::refresh_views() {
+    if (!net_) return;
+    for (int p = 0; p < 2; p++) view_[p] = raypair::make_view(board, p);
 }
 
 void Game::push(const Move& m) {
-    // 指す前と指した後の、両視点の盤面（差分の元になる）
-    raypair::ViewBoard before[2], after[2];
-    if (net_) {
-        for (int p = 0; p < 2; p++) before[p] = raypair::make_view(board, p);
-    }
+    // HalfKP の差分更新は、指す前の盤から取る情報が要る
+    const halfkp::MoveInfo mi = hk_ ? halfkp::make_move_info(board, m) : halfkp::MoveInfo{};
     plies_.push_back(Ply{ m, StateInfo{}, false });
     board.push_move(m, plies_.back().state);
     history_.push_back(make_entry(board, false));
+    if (hk_) {
+        halfkp::Accumulator next = hacc_.back();
+        halfkp::update_accumulator(*hk_, board, mi, hacc_.back(), next);
+        hacc_.push_back(next);
+    }
     if (net_) {
+        // 変わったマスは移動元（駒打ちなら無し）と移動先。両視点の盤面を写し、その差分で蓄積値を更新する
+        const int sqs[2] = { m.is_drop ? -1 : m.from, m.to };
         raypair::Accumulator next = acc_.back();
         for (int p = 0; p < 2; p++) {
-            after[p] = raypair::make_view(board, p);
-            raypair::update_accumulator(*net_, p, before[p], after[p], next);
+            raypair::ViewDelta d;
+            raypair::set_view_squares(view_[p], p, board, sqs, 2, &d);
+            raypair::update_accumulator(*net_, p, view_[p], d, next);
         }
         acc_.push_back(next);
     }
@@ -105,6 +143,7 @@ void Game::push_null() {
         raypair::Accumulator next = acc_.back();
         acc_.push_back(next);
     }
+    if (hk_) hacc_.push_back(hacc_.back());
 }
 
 void Game::pop() {
@@ -119,9 +158,15 @@ void Game::pop() {
     else {
         board.undo_move(p.move, p.state);
     }
+    if (net_ && !p.is_null) {
+        // 戻した盤の、変わったマスを両視点の盤面へ写し直す（蓄積値は acc_ のスタックから戻す）
+        const int sqs[2] = { p.move.is_drop ? -1 : p.move.from, p.move.to };
+        for (int v = 0; v < 2; v++) raypair::set_view_squares(view_[v], v, board, sqs, 2, nullptr);
+    }
     plies_.pop_back();
     history_.pop_back();
     if (net_) acc_.pop_back();
+    if (hk_) hacc_.pop_back();
 }
 
 bool Game::push_usi(const std::string& usi) {
@@ -156,6 +201,11 @@ std::vector<Move> Game::legal_moves() const {
 }
 
 bool Game::accumulator_matches_full() const {
+    if (hk_) {
+        halfkp::Accumulator full;
+        halfkp::full_accumulator(*hk_, board, full);
+        return std::memcmp(&full, &hacc_.back(), sizeof full) == 0;
+    }
     if (!net_) return false;
     raypair::Accumulator full = full_of(*net_, board);
     return std::memcmp(&full, &acc_.back(), sizeof full) == 0;

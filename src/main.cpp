@@ -14,8 +14,11 @@
 #include <vector>
 #include "board/game.h"
 #include "eval/raypair/network.h"
+#include "eval/halfkp/halfkp.h"
 #include "eval/raypair/raypair.h"
 #include "mate/dfpn.h"
+#include "platform/cpu_affinity.h"
+#include "platform/file_util.h"
 #include "search/search.h"
 
 namespace {
@@ -25,7 +28,7 @@ std::mutex g_out_mu;  // 探索のスレッドからも出力するため
 
 void reply(const std::string& s) {
     std::lock_guard<std::mutex> lk(g_out_mu);
-    std::cout << s << std::endl;  // 1行ごとに必ず流す
+    std::cout << platform::to_console(s) << std::endl;  // 1行ごとに必ず流す（Windows では GUI の文字コードに直す）
 }
 
 // "<head> <インデックス…>" の形で1行に返す
@@ -40,11 +43,31 @@ struct EvalState {
     std::string file = "eval/nuenagon.shk";  // EvalFile
     bool file_set = false;                   // EvalFile を明示的に指定したか
     int scale_option = 0;                    // EvalScale（0 ならファイルの値）
+    int fv_scale = 16;                       // FV_SCALE（HalfKP の評価値 = raw / FV_SCALE）
     bool debug_check = false;                // DebugCheckAccumulator
-    raypair::Network net;                    // 読み込んだ重み（loaded のとき）
+    raypair::Network net;                    // 読み込んだ RayPair の重み（loaded かつ !is_halfkp のとき）
+    halfkp::Network hk;                      // 読み込んだ HalfKP の重み（loaded かつ is_halfkp のとき）
+    bool is_halfkp = false;                  // 読み込んだのが HalfKP（nn.bin）か
     bool loaded = false;
-    double scale = 0;                        // 評価に使う eval_scale
+    double scale = 0;                        // 評価に使う eval_scale（RayPair）
 };
+
+// 評価に使う重みの参照（探索と bench で使う）
+search::EvalRef make_ref(const EvalState& ev) {
+    search::EvalRef r;
+    r.net = ev.is_halfkp ? nullptr : &ev.net;
+    r.scale = ev.scale;
+    r.hk = ev.is_halfkp ? &ev.hk : nullptr;
+    r.fv_scale = ev.fv_scale;
+    return r;
+}
+
+// Game に評価関数を設定する（読み込んだ種類に合わせる）
+void attach_eval(Game& g, const EvalState& ev) {
+    if (!ev.loaded) g.set_network(nullptr);
+    else if (ev.is_halfkp) g.set_halfkp(&ev.hk);
+    else g.set_network(&ev.net);
+}
 
 // features <v> <p> ／ linefeatures <v> <p> <L> ／ linesof <sq>（N2）。v：0 = v0、1 = v1。p：0 = 先手視点、1 = 後手視点
 void cmd_features(const Game& game, std::istringstream& in) {
@@ -125,6 +148,9 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
     else if (name == "EvalScale") {
         ev.scale_option = std::max(0, as_int(0));
     }
+    else if (name == "FV_SCALE") {
+        ev.fv_scale = std::clamp(as_int(16), 1, 128);
+    }
     else if (name == "DebugCheckAccumulator") {
         ev.debug_check = (value == "true");
         opt.debug_check = ev.debug_check;
@@ -137,18 +163,46 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
     else if (name == "NetworkDelay") opt.network_delay = std::clamp(as_int(120), 0, 10000);
     else if (name == "USI_Ponder") opt.usi_ponder = (value == "true");
     else if (name == "Deterministic") opt.deterministic = (value == "true");
-    else if (name == "CpuAffinity") opt.cpu_affinity = value;     // 受け付けて覚えるだけ（N5 で使う）
+    else if (name == "CpuAffinity") opt.cpu_affinity = value;     // 論理CPUの指定（§E2.4。isready・go で反映する）
     else if (name == "UsePhysicalCoresOnly") opt.physical_only = (value == "true");
 }
 
-// isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする
-void cmd_isready(Game& game, EvalState& ev) {
-    if (!ev.file_set && !std::ifstream(ev.file).good()) {
+// ファイルの先頭4バイトが HalfKP（やねうら王の NNUE）の版なら true。開けなければ false（RayPair の読み込みで理由を出す）
+bool file_is_halfkp(const std::string& path) {
+    unsigned char b[4] = {0, 0, 0, 0};
+    if (!platform::read_head(path, b, 4)) return false;
+    const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+    return v == halfkp::kMagic;
+}
+
+// isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする。
+// 準備できたら true を返す（readyok は呼び出し側が、CPU の情報の後に出す）。読み込みに失敗したら false
+bool cmd_isready(Game& game, EvalState& ev) {
+    reply(std::string("info string Nuenagon build: simd=") + (NUENAGON_SIMD_AVX2 ? "avx2" : "scalar"));
+    if (!ev.file_set && !platform::read_head(ev.file, nullptr, 0)) {
         ev.loaded = false;
         game.set_network(nullptr);
         reply("info string eval: no weight file (" + ev.file + ")");
-        reply("readyok");
-        return;
+        return true;
+    }
+    if (file_is_halfkp(ev.file)) {
+        // やねうら王の NNUE（HalfKP）。同じエンジンの中で、RayPair と切り替えて使える（§E10）
+        halfkp::Network hk;
+        std::string herr;
+        if (!halfkp::load_network(ev.file, hk, herr)) {
+            ev.loaded = false;
+            game.set_network(nullptr);
+            reply("info string eval load error: " + herr);
+            return false;
+        }
+        ev.hk = std::move(hk);
+        ev.is_halfkp = true;
+        ev.loaded = true;
+        game.set_halfkp(&ev.hk);
+        reply("info string Nuenagon eval: feature=HalfKP network=halfkp_256x2-32-32 W=" + std::to_string(halfkp::kW) +
+              " L1=" + std::to_string(halfkp::kL1) + " L2=" + std::to_string(halfkp::kL2) +
+              " fv_scale=" + std::to_string(ev.fv_scale));
+        return true;
     }
     raypair::Network net;
     std::string err;
@@ -156,9 +210,10 @@ void cmd_isready(Game& game, EvalState& ev) {
         ev.loaded = false;
         game.set_network(nullptr);
         reply("info string eval load error: " + err);
-        return;
+        return false;
     }
     ev.net = std::move(net);
+    ev.is_halfkp = false;
     ev.loaded = true;
     ev.scale = ev.scale_option > 0 ? (double)(float)ev.scale_option : (double)ev.net.eval_scale;
     game.set_network(&ev.net);
@@ -169,7 +224,7 @@ void cmd_isready(Game& game, EvalState& ev) {
          << " W=" << raypair::kW << " L1=" << ev.net.L1 << " L2=" << ev.net.L2
          << " eval_scale=" << ev.scale << (ev.scale_option > 0 ? " (option)" : " (file)");
     reply(info.str());
-    reply("readyok");
+    return true;
 }
 
 // 差分で保っている蓄積値の検査（DebugCheckAccumulator が true のとき。§E3.4）
@@ -186,8 +241,10 @@ void cmd_eval(const Game& game, const EvalState& ev) {
         reply("info string eval not loaded");
         return;
     }
-    int32_t raw = raypair::forward_raw(ev.net, game.accumulator(), game.board.turn);
-    reply("eval raw " + std::to_string(raw) + " cp " + std::to_string(raypair::cp_of(raw, ev.scale)));
+    const int32_t raw = game.raw_eval();
+    // HalfKP は raw / FV_SCALE を 0 の方へ切り捨てる（クリップしない）。RayPair は eval_scale で換算する
+    const long long cp = ev.is_halfkp ? (long long)(raw / ev.fv_scale) : raypair::cp_of(raw, ev.scale);
+    reply("eval raw " + std::to_string(raw) + " cp " + std::to_string(cp));
 }
 
 // acc <p> ／ accfull <p>：視点 p の蓄積値。acc は差分で保っている値、accfull は全計算
@@ -199,6 +256,15 @@ void cmd_acc(const Game& game, const EvalState& ev, std::istringstream& in, bool
     }
     if (!ev.loaded) {
         reply("info string eval not loaded");
+        return;
+    }
+    if (ev.is_halfkp) {
+        halfkp::Accumulator h;
+        if (full) halfkp::full_accumulator(ev.hk, game.board, h);
+        else h = game.halfkp_accumulator();
+        std::string hout = full ? "accfull" : "acc";
+        for (int j = 0; j < halfkp::kW; j++) hout += " " + std::to_string(h.v[p][j]);
+        reply(hout);
         return;
     }
     raypair::Accumulator a;
@@ -291,7 +357,7 @@ void cmd_evalbench(Game& game, const EvalState& ev, std::istringstream& in) {
     long long sum = 0;  // 最適化で評価を消されないように、結果を足して出す
     auto t0 = clock::now();
     for (long long i = 0; i < n; i++) {
-        sum += raypair::forward_raw(ev.net, game.accumulator(), game.board.turn);
+        sum += game.raw_eval();
     }
     auto t1 = clock::now();
     double eval_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
@@ -311,8 +377,11 @@ struct Engine {
     search::Options opt;
     search::TranspositionTable tt;
     search::HintTable hints;
+    cpu::Topology topo = cpu::query_topology();  // CPU の構成（起動時に一度だけ調べる。§E2.4）
+    std::string cpu_error;                       // CpuAffinity の指定の問題（あれば）
     std::unique_ptr<search::ThreadPool> pool;
     int pool_size = -1;
+    std::vector<int> pool_cpus;                  // 今のプールのワーカーが固定されている CPU
     int tt_mb = -1;
     std::shared_ptr<search::Job> job;
     std::thread driver;
@@ -330,17 +399,39 @@ struct Engine {
     ~Engine() { stop_job(); }
 };
 
-// 置換表とスレッドプールを、設定（Threads・USI_Hash）に合わせる。ジョブが無いときに呼ぶ
+// 置換表とスレッドプールを、設定（Threads・USI_Hash・CpuAffinity・UsePhysicalCoresOnly）に合わせる。ジョブが無いときに呼ぶ
 void apply_config(Engine& e) {
     if (e.tt_mb != e.opt.hash_mb) {
         e.tt.resize(e.opt.hash_mb);
         e.tt_mb = e.opt.hash_mb;
     }
+    // 探索スレッドを固定する CPU（§E2.4）。指定が読めなければ固定しない（OS に任せる）
+    std::vector<int> cpus;
+    e.cpu_error.clear();
+    if (!cpu::select_cpus(e.opt.cpu_affinity, e.opt.physical_only, e.topo, cpus, e.cpu_error)) cpus.clear();
+    e.opt.cpus = cpus;
+
     const int want = std::max(0, e.opt.threads - 1);  // 探索スレッドは main（driver）＋ helper
-    if (e.pool_size != want) {
-        e.pool.reset(new search::ThreadPool(want));
+    if (e.pool_size != want || e.pool_cpus != cpus) {
+        e.pool.reset(new search::ThreadPool(want, cpus));
         e.pool_size = want;
+        e.pool_cpus = cpus;
     }
+}
+
+// isready の後の CPU の情報（§E2.4）。物理コア数と、固定に使う CPU を出す
+std::string cpu_info_line(const Engine& e) {
+    std::ostringstream out;
+    out << "info string Nuenagon cpu: logical=" << e.topo.logical << " physical=" << e.topo.physical
+        << " threads=" << e.opt.threads << " affinity=" << e.opt.cpu_affinity
+        << " physical_only=" << (e.opt.physical_only ? "true" : "false") << " cpus=";
+    if (e.opt.cpus.empty()) out << "none";
+    for (size_t i = 0; i < e.opt.cpus.size(); i++) out << (i ? "," : "") << e.opt.cpus[i];
+    if (!e.cpu_error.empty()) out << " warning: " << e.cpu_error;
+    if (e.pool && e.pool->pin_failures() > 0) {
+        out << " warning: 固定に失敗したスレッドが " << e.pool->pin_failures() << " 個（OS に任せる）";
+    }
+    return out.str();
 }
 
 // go <引数…>（§E2.1）。ジョブ番号0として起動する
@@ -380,7 +471,7 @@ void cmd_go(Engine& e, const EvalState& ev, const Game& game, std::istringstream
 
     apply_config(e);
     e.tt.new_generation();  // 世代を進める（§E5.3）
-    const search::EvalRef ref{&ev.net, ev.scale};
+    const search::EvalRef ref = make_ref(ev);
     auto job = std::make_shared<search::Job>(game, lim, e.opt, ref, e.tt, e.pool.get(), &e.hints, false,
                                              [](const std::string& s) { reply(s); });
     e.job = job;
@@ -410,15 +501,15 @@ void cmd_bench(Engine& e, const EvalState& ev, std::istringstream& in) {
     search::Options o = e.opt;
     o.threads = std::clamp(threads, 1, 256);
     o.deterministic = false;
-    std::unique_ptr<search::ThreadPool> bench_pool(new search::ThreadPool(o.threads - 1));
+    std::unique_ptr<search::ThreadPool> bench_pool(new search::ThreadPool(o.threads - 1, o.cpus));
     e.tt.clear();
-    const search::EvalRef ref{&ev.net, ev.scale};
+    const search::EvalRef ref = make_ref(ev);
 
     long long nodes = 0;
     const auto t0 = std::chrono::steady_clock::now();
     for (const char* mv : kPositions) {
         Game g;
-        g.set_network(&ev.net);
+        attach_eval(g, ev);
         g.set_startpos();
         std::istringstream ms(mv);
         std::string u;
@@ -460,6 +551,7 @@ int main() {
             reply("option name USI_Hash type spin default 256 min 1 max 65536");
             reply("option name EvalFile type string default eval/nuenagon.shk");
             reply("option name EvalScale type spin default 0 min 0 max 10000");
+            reply("option name FV_SCALE type spin default 16 min 1 max 128");
             reply("option name NetworkDelay type spin default 120 min 0 max 10000");
             reply("option name USI_Ponder type check default false");
             reply("option name MaxPly type spin default 0 min 0 max 10000");
@@ -475,11 +567,10 @@ int main() {
         }
         else if (cmd == "isready") {
             eng.stop_job();
-            cmd_isready(game, ev);
-            if (ev.loaded) {
+            if (cmd_isready(game, ev)) {
                 apply_config(eng);
-                reply("info string Nuenagon cpu: logical=" + std::to_string(std::thread::hardware_concurrency()) +
-                      " threads=" + std::to_string(eng.opt.threads) + " affinity=" + eng.opt.cpu_affinity);
+                reply(cpu_info_line(eng));
+                reply("readyok");
             }
         }
         else if (cmd == "usinewgame") {

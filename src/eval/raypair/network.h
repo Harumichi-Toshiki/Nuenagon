@@ -5,6 +5,8 @@
 #include <vector>
 #include "eval/raypair/raypair.h"
 
+#include "eval/simd.h"
+
 namespace raypair {
 
 constexpr int kW = 128;  // 第1層の幅 W（v0・v1 とも 128）
@@ -38,8 +40,8 @@ bool load_network(const std::string& path, Network& net, std::string& err);
 // 全計算（§E3.1）。両視点の蓄積値を、盤面から作り直す
 void full_accumulator(const Network& net, const Board& board, Accumulator& acc);
 
-// 1手ぶんの差分更新（§E3.2）。p 視点の蓄積値 acc[p] を、盤面 pre → post の差で更新する
-void update_accumulator(const Network& net, int p, const ViewBoard& pre, const ViewBoard& post, Accumulator& acc);
+// 1手ぶんの差分更新（§E3.2）。p 視点の蓄積値 acc[p] を、変わったもの d で更新する。post は指した後の視点の盤面
+void update_accumulator(const Network& net, int p, const ViewBoard& post, const ViewDelta& d, Accumulator& acc);
 
 // 最終出力 raw（§E4）。stm は手番（0 = 先手、1 = 後手）
 int32_t forward_raw(const Network& net, const Accumulator& acc, int stm);
