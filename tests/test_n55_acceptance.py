@@ -1,7 +1,9 @@
 # 変更禁止（PROTECTED）。Nuenagon N5.5（探索の改良：指し手の生成と並べ替え、枝刈りと延長、将棋ならではの工夫）の受け入れテスト。
 #
 # N5.5 では探索の木を自由に変えてよい（設計書 v1.6 §E11）。良し悪しは、N5H（コミット 898cd01）と比べて決める。
-# テストが N5H を git から取り出して一時フォルダにビルドし、同じ環境で比べる。評価関数は tests/golden/material_v0.shk。
+# テストが N5H を git から取り出して一時フォルダにビルドし、同じ環境で比べる。
+# 評価関数は tests/golden/raypair_v0_trained.shk（持ち主が Shikibu で学習した RayPair_v0。本番に近い条件で比べるため）。
+# （改訂：最初の版は material_v0.shk だった。駒の損得しか分からない評価関数では、静的評価に頼る枝刈りの効き目を正しく測れないため変えた。）
 #
 # ■ 深さ：tests/n5_cases.py の SPEED_POSITIONS（12 局面）を、Threads=1・go movetime 1000 で探索し、
 #   bestmove の直前の info の depth の平均が、N5H より 2.0 以上大きい。
@@ -38,6 +40,7 @@ import n5_cases as C  # noqa: E402
 
 REF_COMMIT = "898cd01"
 MATERIAL = C.MATERIAL
+EVAL = os.path.join(HERE, "golden", "raypair_v0_trained.shk")
 N1 = C.N1
 REQUIRED = ["SearchLMRTable", "SearchRFP", "SearchNullMoveDynamic", "SearchLMP", "SearchSEEPrune",
             "SearchContHistory", "SearchMate1Ply", "SearchDropPrune"]
@@ -74,7 +77,7 @@ def start(exe, opts=()):
     e = C.Engine(exe)
     e.send("usi")
     usi = e.lines_until("usiok")
-    base = [("EvalFile", MATERIAL), ("Threads", 1), ("USI_Hash", 64), ("NetworkDelay", 0), ("USI_Ponder", "false"),
+    base = [("EvalFile", EVAL), ("Threads", 1), ("USI_Hash", 64), ("NetworkDelay", 0), ("USI_Ponder", "false"),
             ("MultiPV", 1), ("Deterministic", "false"), ("DebugCheckAccumulator", "false")]
     for k, v in base + list(opts):
         e.send(f"setoption name {k} value {v}")
