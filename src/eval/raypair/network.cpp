@@ -1,4 +1,5 @@
 // 重みファイルの読み込みと量子化、差分更新、推論（設計書 §F4・§E3・§E4）。
+#include "platform/file_util.h"
 #include "network.h"
 #include <cmath>
 #include <cstring>
@@ -86,12 +87,11 @@ private:
 }  // namespace
 
 bool load_network(const std::string& path, Network& net, std::string& err) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
+    std::vector<uint8_t> d;
+    if (!platform::read_whole_file(path, d)) {
         err = "ファイルを開けない: " + path;
         return false;
     }
-    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 
     if (d.size() < kHeaderSize + 4) { err = "短すぎる"; return false; }
     if (std::memcmp(d.data(), "SHIKIBU\0", 8) != 0) { err = "マジックが違う"; return false; }

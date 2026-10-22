@@ -18,6 +18,7 @@
 #include "eval/raypair/raypair.h"
 #include "mate/dfpn.h"
 #include "platform/cpu_affinity.h"
+#include "platform/file_util.h"
 #include "search/search.h"
 
 namespace {
@@ -27,7 +28,7 @@ std::mutex g_out_mu;  // 探索のスレッドからも出力するため
 
 void reply(const std::string& s) {
     std::lock_guard<std::mutex> lk(g_out_mu);
-    std::cout << s << std::endl;  // 1行ごとに必ず流す
+    std::cout << platform::to_console(s) << std::endl;  // 1行ごとに必ず流す（Windows では GUI の文字コードに直す）
 }
 
 // "<head> <インデックス…>" の形で1行に返す
@@ -168,9 +169,8 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
 
 // ファイルの先頭4バイトが HalfKP（やねうら王の NNUE）の版なら true。開けなければ false（RayPair の読み込みで理由を出す）
 bool file_is_halfkp(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
     unsigned char b[4] = {0, 0, 0, 0};
-    if (!f.read(reinterpret_cast<char*>(b), 4)) return false;
+    if (!platform::read_head(path, b, 4)) return false;
     const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
     return v == halfkp::kMagic;
 }
@@ -179,7 +179,7 @@ bool file_is_halfkp(const std::string& path) {
 // 準備できたら true を返す（readyok は呼び出し側が、CPU の情報の後に出す）。読み込みに失敗したら false
 bool cmd_isready(Game& game, EvalState& ev) {
     reply(std::string("info string Nuenagon build: simd=") + (NUENAGON_SIMD_AVX2 ? "avx2" : "scalar"));
-    if (!ev.file_set && !std::ifstream(ev.file).good()) {
+    if (!ev.file_set && !platform::read_head(ev.file, nullptr, 0)) {
         ev.loaded = false;
         game.set_network(nullptr);
         reply("info string eval: no weight file (" + ev.file + ")");
