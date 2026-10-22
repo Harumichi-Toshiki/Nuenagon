@@ -1,5 +1,6 @@
 // HalfKP（やねうら王の halfkp_256x2-32-32）の読み込み・全計算・差分更新・推論（設計書 §E10）。
 // 定義は tests/halfkp_ref.py（やねうら王の値と一致することを確かめてある）。
+#include "platform/file_util.h"
 #include "eval/halfkp/halfkp.h"
 
 #include <cstring>
@@ -158,12 +159,11 @@ MoveInfo make_move_info(const Board& before, const Move& m) {
 }
 
 bool load_network(const std::string& path, Network& net, std::string& err) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
+    std::vector<uint8_t> d;
+    if (!platform::read_whole_file(path, d)) {
         err = "ファイルを開けない: " + path;
         return false;
     }
-    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (d.size() < 12) {
         err = "短すぎる";
         return false;
