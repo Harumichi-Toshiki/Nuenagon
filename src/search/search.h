@@ -72,6 +72,13 @@ struct Options {
     int search_razor_margin = 300;      // SearchRazorMargin：razoring の深さ1あたりの余裕
     int search_futility_margin = 250;   // SearchFutilityMargin：futility の深さ1あたりの余裕
     int search_see_margin = 40;         // SearchSEEMargin：SEE 枝刈りの静かな手の閾値（深さ1あたり）
+
+    // 並べ替え・静止探索の入り切り（既定は true。false なら N5H と同じ動き）
+    bool search_order_see = true;       // SearchOrderSEE：駒を取る手を SEE で分ける（false なら MVV-LVA）
+    bool search_history_gravity = true; // SearchHistoryGravity：履歴を減衰つきで更新し、試した静かな手を減点する（false なら加算のみ）
+    bool search_counter_move = true;    // SearchCounterMove：カウンター手を並べ替えに使う
+    bool search_qsee = true;            // SearchQSEE：静止探索で SEE が負の取る手を読まない（false なら N5 の簡易判定）
+    bool search_lazy_legal = true;      // SearchLazyLegal：疑似合法手で生成し、指した後に自玉の安全を確かめる（false なら合法手で生成）
 };
 
 // 評価に使う重み（どちらも nullptr なら評価できない）。Game が持つのと同じ重みを指す
