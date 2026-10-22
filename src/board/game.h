@@ -48,6 +48,9 @@ public:
     std::vector<Move> legal_moves() const;
     // 合法手を out に書き、その終わりを返す（out は MAX_LEGAL_MOVES 以上）。確保はしない
     Move* gen_legal(Move* out) const { return generate_moves(board.bit_pos, out); }
+    // 疑似合法手（自玉が利きにさらされる手や、打ち歩詰めを含む）を out に書き、その終わりを返す（§E11）。
+    // 探索では指した後に、自玉の安全を確かめる（合法性の確認を後回しにする）。
+    Move* gen_pseudo(Move* out) const { return generate_moves_simple(board.bit_pos, out); }
 
     // 現在の第1層の蓄積値（重みを設定しているときだけ使える）
     const raypair::Accumulator& accumulator() const { return acc_.back(); }

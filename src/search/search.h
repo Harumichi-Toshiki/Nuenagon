@@ -52,6 +52,26 @@ struct Options {
     std::string cpu_affinity = "auto";  // CpuAffinity（"auto" または論理CPUの一覧。§E2.4）
     bool physical_only = false;         // UsePhysicalCoresOnly（§E2.4）
     std::vector<int> cpus;              // 探索スレッドを固定する論理CPU（空なら固定しない。main が決めて渡す）
+
+    // 探索の改良の入り切り（§E11。USI の check "Search…"。既定は true）
+    bool search_lmr_table = true;       // SearchLMRTable：LMR の削減量を表（深さ・手の順番）から決め、履歴・改善で増減する
+    bool search_rfp = true;             // SearchRFP：評価が β を大きく超えたら、浅い深さで即座に返す
+    bool search_null_dynamic = true;    // SearchNullMoveDynamic：null move の削減量を深さと評価値の差で決め、深いところは検証する
+    bool search_lmp = true;             // SearchLMP：静かな手の数による枝刈り（改善で閾値を変える）
+    bool search_see_prune = true;       // SearchSEEPrune：浅い深さで、SEE の悪い取る手・静かな手を刈る
+    bool search_cont_hist = true;       // SearchContHistory：連続履歴（直前の手・2手前の手との組み合わせ）を並べ替えに使う
+    bool search_mate1 = true;           // SearchMate1Ply：各節点で、1手で詰む手（王手）を調べる
+    bool search_drop_prune = true;      // SearchDropPrune：浅い深さで、玉から遠く、どの駒にも利かない打つ手を刈る
+    bool search_iir = true;             // SearchIIR：置換表に手が無いとき、1手浅く読む
+    bool search_improving = true;       // SearchImproving：評価値が2手前より上がっているかで、枝刈りを調整する
+    bool search_razoring = true;        // SearchRazoring：浅い深さで評価値が α を大きく下回るとき、静止探索で返す
+
+    // 枝刈りの幅（USI の spin。持ち主が評価関数に合わせて調整する。点数は内部の単位。material_v0 は歩 約270点）
+    int search_rfp_margin = 180;        // SearchRFPMargin：RFP の深さ1あたりの余裕
+    int search_lmp_scale = 3;           // SearchLMPScale：LMP の手の数の係数（scale × (3 + 深さ²)）
+    int search_razor_margin = 300;      // SearchRazorMargin：razoring の深さ1あたりの余裕
+    int search_futility_margin = 250;   // SearchFutilityMargin：futility の深さ1あたりの余裕
+    int search_see_margin = 40;         // SearchSEEMargin：SEE 枝刈りの静かな手の閾値（深さ1あたり）
 };
 
 // 評価に使う重み（どちらも nullptr なら評価できない）。Game が持つのと同じ重みを指す

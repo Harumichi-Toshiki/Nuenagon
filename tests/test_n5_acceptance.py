@@ -1,23 +1,14 @@
-# 変更禁止（PROTECTED）。Nuenagon N5（高速化：探索の結果を変えずに速くする、CPU の割り当て）の受け入れテスト。
+# 変更禁止（PROTECTED）。Nuenagon N5（高速化、CPU の割り当て）の受け入れテスト。N5.5 で改訂（N4.1 との結果の一致と速さの比較を外した）。
 #
-# ■ 結果が変わらないこと（設計書 v1.4 §E5.9・§E8）
-#   tests/n5_cases.py の局面集（重みは3種類：material_v0、v1 の乱数の重み、v0 の極端な重み）を、
-#   Threads=1・Deterministic=true・USI_Hash=64・go nodes N で探索したとき、すべての "info depth …" の行の
-#   depth・seldepth・multipv・score・nodes・pv と、bestmove の行が、正解データ（golden/n5_golden.json）と一致する。
-#   正解データは N4.1（コミット ae08a26）に「決定的モードではルートの詰み探索を時間で止めない」を加えたもので作った。
-#   ただし、ルートの詰み探索が見つけた詰みの行（nodes が 0 の mate の行）は、手と「勝ちの詰み」であることだけを比べる
-#   （詰み探索の手数は、標準ライブラリの実装の違いで変わることがあるため）。
-#   これを、既定のビルド（build/）と、SIMD を使わないビルド（-DNUENAGON_SIMD=OFF、テストが build_scalar/ に作る）の両方で確かめる。
+# ■ SIMD の有無で結果が変わらないこと（N5.5 で改訂）
+#   N5 では「N4.1 と探索の結果が同じ」「N4.1 の 2 倍の速さ」を確かめていたが、N5.5 で探索そのものを変えるため外した。
+#   代わりに、既定のビルド（build/）と SIMD を使わないビルド（-DNUENAGON_SIMD=OFF、テストが build_scalar/ に作る）で、
+#   tests/n5_cases.py の局面集を Threads=1・Deterministic=true・go nodes N で探索したときの info（depth・seldepth・multipv・
+#   score・nodes・pv）と bestmove が、互いに完全に一致することを確かめる（評価関数の計算が SIMD に依存しないこと）。
 #
 # ■ SIMD の有無の表示
 #   isready の後に "info string Nuenagon build: simd=<avx2|scalar>" を出す（このビルドが実際に使う SIMD）。
 #   CMake のオプション NUENAGON_SIMD（既定 ON）が ON なら、CPU が AVX2 に対応する環境で avx2、OFF なら scalar。
-#
-# ■ 速さ
-#   テストが N4.1（コミット ae08a26）を一時フォルダにビルドし、同じ局面（tests/n5_cases.py の SPEED_POSITIONS）を
-#   Threads=1・Deterministic=false・go nodes 300000 で、交互に2回ずつ探索する。各局面で速い方の時間を取り、
-#   その合計で N4.1 ÷ 新しいエンジン が 2.0 以上であること。あわせて、両者の最後の info の nodes が一致すること
-#   （同じ探索をしていること）。
 #
 # ■ CPU の割り当て（設計書 §E2.4。Linux で確かめる）
 #   CpuAffinity=<番号> にすると、探索スレッドがその論理CPUだけで動く（/proc/<pid>/task/*/status の
@@ -30,10 +21,8 @@
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 import pytest
@@ -43,7 +32,6 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import n5_cases as C  # noqa: E402
 
-REF_COMMIT = "ae08a26"
 GOLD = json.load(open(C.GOLDEN, encoding="utf-8"))
 
 
@@ -82,9 +70,10 @@ def same_info(a, b):
     return a == b
 
 
-def check_all(exe, shk_paths):
+def run_all(exe, shk_paths):
+    """局面集を探索し、(局面, 結果) の一覧を返す。"""
     engines = {}
-    bad = []
+    out = []
     try:
         for case in GOLD["cases"]:
             kind = case["kind"]
@@ -93,17 +82,11 @@ def check_all(exe, shk_paths):
                 C.setup(e, shk_paths[kind])
                 engines[kind] = e
             r, _ = C.run_case(engines[kind], case["pos"], case["multipv"], case["nodes"])
-            ok = r["bestmove"] == case["bestmove"] and len(r["infos"]) == len(case["infos"]) and \
-                all(same_info(x, y) for x, y in zip(case["infos"], r["infos"]))
-            if not ok:
-                diff = next((i for i, (x, y) in enumerate(zip(case["infos"], r["infos"])) if not same_info(x, y)), None)
-                detail = (f"info {diff} 行目：正解 {case['infos'][diff]} ／ 実際 {r['infos'][diff]}" if diff is not None else
-                          f"info の行数 {len(case['infos'])} → {len(r['infos'])}、bestmove {case['bestmove']} → {r['bestmove']}")
-                bad.append(f"{case['name']}（{case['pos'][:60]}）: {detail}")
+            out.append((case, r))
     finally:
         for e in engines.values():
             e.close()
-    assert not bad, f"{len(bad)} 局面で N4.1 と結果が違う:\n" + "\n".join(bad[:10])
+    return out
 
 
 def build_line(exe, shk):
@@ -126,19 +109,19 @@ def has_avx2():
         return False
 
 
-# ---------------------------------------------------------------- 結果が変わらないこと
-
-def test_same_results_default_build(shk_paths):
-    check_all(exe_in(os.path.join(ROOT, "build")), shk_paths)
-
+# ---------------------------------------------------------------- SIMD の有無で結果が変わらないこと
 
 @pytest.fixture(scope="module")
 def scalar_exe():
     return cmake_build(ROOT, os.path.join(ROOT, "build_scalar"), ["-DNUENAGON_SIMD=OFF"])
 
 
-def test_same_results_scalar_build(scalar_exe, shk_paths):
-    check_all(scalar_exe, shk_paths)
+def test_scalar_build_same_results(scalar_exe, shk_paths):
+    d = run_all(exe_in(os.path.join(ROOT, "build")), shk_paths)
+    sc = run_all(scalar_exe, shk_paths)
+    bad = [f"{case['name']}（{case['pos'][:60]}）: 既定 {a['bestmove']} ／ SIMD なし {b['bestmove']}"
+           for (case, a), (_, b) in zip(d, sc) if a != b]
+    assert not bad, f"{len(bad)} 局面で、SIMD の有無で探索の結果が違う:\n" + "\n".join(bad[:10])
 
 
 def test_simd_reported(scalar_exe):
@@ -148,52 +131,6 @@ def test_simd_reported(scalar_exe):
     assert "simd=scalar" in s[0], f"NUENAGON_SIMD=OFF のビルドが scalar と表示していない: {s[0]}"
     if has_avx2():
         assert "simd=avx2" in d[0], f"既定のビルドが avx2 を使っていない: {d[0]}"
-
-
-# ---------------------------------------------------------------- 速さ
-
-@pytest.fixture(scope="module")
-def ref_exe():
-    tmp = tempfile.mkdtemp(prefix="nue_ref_")
-    wt = os.path.join(tmp, "src")
-    r = subprocess.run(["git", "-C", ROOT, "worktree", "add", "--detach", wt, REF_COMMIT], capture_output=True, text=True)
-    assert r.returncode == 0, f"N4.1（{REF_COMMIT}）を取り出せない: {r.stderr}"
-    try:
-        yield cmake_build(wt, os.path.join(tmp, "build"))
-    finally:
-        subprocess.run(["git", "-C", ROOT, "worktree", "remove", "--force", wt], capture_output=True)
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_speedup(ref_exe):
-    new_exe = exe_in(os.path.join(ROOT, "build"))
-    engines = {}
-    for name, exe in (("ref", ref_exe), ("new", new_exe)):
-        e = C.Engine(exe)
-        C.setup(e, C.MATERIAL, deterministic=False)
-        engines[name] = e
-    best = {"ref": [], "new": []}
-    nodes = {"ref": [], "new": []}
-    try:
-        for pos in C.SPEED_POSITIONS:
-            t = {"ref": 1e9, "new": 1e9}
-            for rep in range(2):
-                for name in ("ref", "new"):
-                    r, el = C.run_case(engines[name], pos, 1, 300000)
-                    t[name] = min(t[name], el)
-                    if rep == 0:
-                        nodes[name].append(r["infos"][-1]["nodes"] if r["infos"] else None)
-            for name in t:
-                best[name].append(t[name])
-    finally:
-        for e in engines.values():
-            e.close()
-    rt, nt = sum(best["ref"]), sum(best["new"])
-    ratio = rt / nt
-    print(f"\n速さ：N4.1 {rt:.2f} 秒、新 {nt:.2f} 秒、{ratio:.2f} 倍（局面ごと：" +
-          ", ".join(f"{a / b:.2f}" for a, b in zip(best['ref'], best['new'])) + "）")
-    assert nodes["ref"] == nodes["new"], f"N4.1 と探索のノード数が違う（同じ探索になっていない）: {nodes}"
-    assert ratio >= 2.0, f"N4.1 の {ratio:.2f} 倍（2.0 倍以上が必要）"
 
 
 # ---------------------------------------------------------------- CPU の割り当て

@@ -38,6 +38,40 @@ void reply_indices(const std::string& head, const std::vector<int>& idx) {
     reply(out);
 }
 
+// 探索の改良の入り切り（§E11）。USI の check "Search…"（既定は search::Options の既定値）
+struct SearchFlag {
+    const char* name;
+    bool search::Options::*field;
+};
+// 枝刈りの幅（USI の spin。名前は Search で始める）
+struct SearchSpin {
+    const char* name;
+    int search::Options::*field;
+    int min;
+    int max;
+};
+const SearchSpin kSearchSpins[] = {
+    {"SearchRFPMargin", &search::Options::search_rfp_margin, 0, 1000},
+    {"SearchLMPScale", &search::Options::search_lmp_scale, 1, 10},
+    {"SearchRazorMargin", &search::Options::search_razor_margin, 0, 1000},
+    {"SearchFutilityMargin", &search::Options::search_futility_margin, 0, 1000},
+    {"SearchSEEMargin", &search::Options::search_see_margin, 0, 500},
+};
+
+const SearchFlag kSearchFlags[] = {
+    {"SearchLMRTable", &search::Options::search_lmr_table},
+    {"SearchRFP", &search::Options::search_rfp},
+    {"SearchNullMoveDynamic", &search::Options::search_null_dynamic},
+    {"SearchLMP", &search::Options::search_lmp},
+    {"SearchSEEPrune", &search::Options::search_see_prune},
+    {"SearchContHistory", &search::Options::search_cont_hist},
+    {"SearchMate1Ply", &search::Options::search_mate1},
+    {"SearchDropPrune", &search::Options::search_drop_prune},
+    {"SearchIIR", &search::Options::search_iir},
+    {"SearchImproving", &search::Options::search_improving},
+    {"SearchRazoring", &search::Options::search_razoring},
+};
+
 // 評価関数の設定（USI オプション §E2.3）と、読み込んだ重み
 struct EvalState {
     std::string file = "eval/nuenagon.shk";  // EvalFile
@@ -165,6 +199,14 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
     else if (name == "Deterministic") opt.deterministic = (value == "true");
     else if (name == "CpuAffinity") opt.cpu_affinity = value;     // 論理CPUの指定（§E2.4。isready・go で反映する）
     else if (name == "UsePhysicalCoresOnly") opt.physical_only = (value == "true");
+    else {
+        for (const SearchFlag& f : kSearchFlags) {
+            if (name == f.name) opt.*(f.field) = (value == "true");
+        }
+        for (const SearchSpin& s : kSearchSpins) {
+            if (name == s.name) opt.*(s.field) = std::clamp(as_int(0), s.min, s.max);
+        }
+    }
 }
 
 // ファイルの先頭4バイトが HalfKP（やねうら王の NNUE）の版なら true。開けなければ false（RayPair の読み込みで理由を出す）
@@ -559,6 +601,15 @@ int main() {
             reply("option name MultiPV type spin default 1 min 1 max 500");
             reply("option name Deterministic type check default false");
             reply("option name DebugCheckAccumulator type check default false");
+            for (const SearchFlag& f : kSearchFlags) {
+                reply(std::string("option name ") + f.name + " type check default " +
+                      (search::Options{}.*(f.field) ? "true" : "false"));
+            }
+            for (const SearchSpin& s : kSearchSpins) {
+                reply(std::string("option name ") + s.name + " type spin default " +
+                      std::to_string(search::Options{}.*(s.field)) + " min " + std::to_string(s.min) +
+                      " max " + std::to_string(s.max));
+            }
             reply("usiok");
         }
         else if (cmd == "setoption") {
