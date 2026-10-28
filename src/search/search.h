@@ -72,7 +72,7 @@ struct Options {
     int search_razor_margin = 300;      // SearchRazorMargin：razoring の深さ1あたりの余裕
     int search_futility_margin = 250;   // SearchFutilityMargin：futility の深さ1あたりの余裕
     int search_see_margin = 40;         // SearchSEEMargin：SEE 枝刈りの静かな手の閾値（深さ1あたり）
-    int search_rfp_depth = 7;           // SearchRFPDepth：RFP を使う最大の深さ
+    int search_rfp_depth = 3;           // SearchRFPDepth：RFP を使う最大の深さ（7 は長い詰将棋を 13 問に減らす。3 なら 16 問）
 
     // 並べ替え・静止探索の入り切り（既定は true。false なら N5H と同じ動き）
     bool search_order_see = true;       // SearchOrderSEE：駒を取る手を SEE で分ける（false なら MVV-LVA）
