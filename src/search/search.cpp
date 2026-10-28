@@ -567,7 +567,7 @@ int Worker::qsearch(int alpha, int beta, int ply, int qd) {
     const int qalpha0 = alpha;
     {
         TTEntry te;
-        if (sh_.tt->probe(qkey, te)) {
+        if (!sh_.no_tt_read && sh_.tt->probe(qkey, te)) {
             const int s = from_tt(te.score, ply);
             if (te.bound == kExact || (te.bound == kLower && s >= beta) || (te.bound == kUpper && s <= alpha)) return s;
         }
@@ -661,7 +661,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     TTEntry tte;
     bool has_tt = false;
     Move tt_move{};
-    if (sh_.tt->probe(key, tte)) {
+    if (!sh_.no_tt_read && sh_.tt->probe(key, tte)) {
         has_tt = tte.has_move;
         tt_move = tte.move;
         if (!pv_node && tte.depth >= depth) {
@@ -808,7 +808,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
                 }
                 if (red > 0 && hint) {
                     for (const HintEntry& h : *hint) {
-                        if (same_move(h.move, m) && h.prob >= 0.10) red = 0;
+                        if (same_move(h.move, m) && h.prob >= o.hint_lmr_threshold) red = 0;
                     }
                 }
                 red = std::clamp(red, 0, std::max(0, nd - 1));
@@ -875,8 +875,9 @@ int Worker::search_root(int depth, int alpha, int beta, int pv_idx, std::vector<
             rm[i].pv.assign(1, m);
             for (int k = 0; k < pv_len_[1]; k++) rm[i].pv.push_back(pv_at(1, k));
         }
-        else {
-            // 窓に届かなかった手：値は上限（この手はこれ以下）。読み筋は前の段のものを残す
+        else if (!(sh_.exact_all && rm[i].depth == depth && rm[i].bound == kExact)) {
+            // 窓に届かなかった手：値は上限（この手はこれ以下）。読み筋は前の段のものを残す。
+            // exact_all では、この段で正確な値を得た手は上書きしない
             rm[i].score = s;
             rm[i].bound = kUpper;
         }
@@ -893,13 +894,15 @@ int Worker::search_root(int depth, int alpha, int beta, int pv_idx, std::vector<
 template <class F>
 void Worker::iterate(std::vector<RootMove>& rm, int max_depth, const F* on_depth) {
     const int multipv = std::max(1, std::min<int>(sh_.opt.multipv, (int)rm.size()));
-    for (int depth = 1; depth <= max_depth; depth++) {
+    for (int depth = 1; depth <= std::min(max_depth, sh_.max_depth.load()); depth++) {
         // helper は段を飛ばして、main と違う順で読む（Lazy SMP）
         if (on_depth == nullptr && id_ % 2 == 1 && depth % 2 == 0 && depth > 2) continue;
 
         seldepth_ = 0;
         bool aborted_now = false;
-        for (int pv = 0; pv < multipv; pv++) {
+        int pv = 0;
+        int repass = 0;  // exact_all：同じ位置を読み直した回数（この段の中で数える）
+        while (pv < multipv) {
             const int prev = rm[pv].score;
             int delta = 20;
             int alpha = -kInf, beta = kInf;
@@ -929,6 +932,13 @@ void Worker::iterate(std::vector<RootMove>& rm, int max_depth, const F* on_depth
             }
             std::stable_sort(rm.begin() + pv, rm.end(),
                              [](const RootMove& a, const RootMove& b) { return a.score > b.score; });
+            // exact_all（rank）：並べ替えの後に同じ位置へ来た手が、この段の正確な値でなければ、その手をもう一度読む
+            if (sh_.exact_all && !(rm[pv].depth == depth && rm[pv].bound == kExact) && repass++ < 4 * multipv) continue;
+            pv++;
+            // exact_all：この段で正確な値を得た手は読み飛ばす（並べ替えは、読んだ位置より後ろしか動かさない）
+            if (sh_.exact_all) {
+                while (pv < multipv && rm[pv].depth == depth && rm[pv].bound == kExact) pv++;
+            }
         }
         if (aborted_now) break;
         sh_.nodes.fetch_add(pending_, std::memory_order_relaxed);  // 報告の前に、ノード数を共有へ足す
@@ -943,7 +953,38 @@ void Worker::iterate(std::vector<RootMove>& rm, int max_depth, const F* on_depth
 
 namespace {
 
-// 探索の深さごとの報告（§E5.8 の出来事を含む）
+constexpr int kDjpMateTableSize = 1 << 18;      // DJP の詰み探索の表（ジョブごと）
+constexpr long long kDjpMateNodes = 100000000;  // 制限の無い詰み探索のノード数の上限
+
+// helper の作業の締め切り。本体が終わると、始まった helper だけを待つ。まだ始まっていない作業は何もせずに戻る
+struct HelperSync {
+    std::mutex mu;
+    std::condition_variable cv;
+    int started = 0;
+    int finished = 0;
+    bool closed = false;
+
+    bool enter() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (closed) return false;
+        started++;
+        return true;
+    }
+    void leave() {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            finished++;
+        }
+        cv.notify_all();
+    }
+    void close() {
+        std::unique_lock<std::mutex> lk(mu);
+        closed = true;
+        cv.wait(lk, [this] { return finished == started; });
+    }
+};
+
+// 探索の深さごとの報告（§E5.8 の出来事を含む）。info 行は sink へ、根の手ごとの値は root_report へ渡す
 struct Reporter {
     Job::Shared* sh;
     long long start_ms;
@@ -993,6 +1034,7 @@ struct Reporter {
             has_prev = true;
             prev_score = best.score;
         }
+        if (sh->root_report) sh->root_report(depth, rm, nodes, ms);
         *out = rm;
     }
 };
@@ -1003,11 +1045,14 @@ Job::Job(const Game& root, const Limits& lim, const Options& opt, const EvalRef&
          ThreadPool* pool, const HintTable* hints, bool null_root, InfoSink sink)
     : root_(root), lim_(lim), pool_(pool), null_root_(null_root) {
     sh_.tt = &tt;
-    sh_.hints = hints;
+    sh_.hints = opt.hint_weight > 0 ? hints : nullptr;  // hint_weight が 0 のときは、ヒントを使わない（§E5.5）
     sh_.opt = opt;
     sh_.ev = ev;
     sh_.sink = std::move(sink);
     sh_.node_limit = lim.nodes;
+    sh_.exact_all = lim.exact_all;
+    sh_.no_tt_read = lim.mode == JobMode::kProbe;
+    sh_.max_depth = lim.depth > 0 ? std::min(lim.depth, kMaxDepth) : kMaxDepth;
 }
 
 void Job::stop() {
@@ -1016,6 +1061,13 @@ void Job::stop() {
 }
 
 long long Job::nodes() const { return sh_.nodes.load(); }
+
+// 動いているジョブに上限を付ける（§E9.5 の promote）。時間は今から、ノード数は今の数から足す
+void Job::extend(long long time_ms, long long nodes, int depth) {
+    if (time_ms > 0) sh_.deadline_ms = now_ms() + time_ms;
+    if (nodes > 0) sh_.node_limit = sh_.nodes.load() + nodes;
+    if (depth > 0) sh_.max_depth = std::min(depth, kMaxDepth);
+}
 
 // 持ち時間から思考時間を求める（§E5.1）。秒読みは次の手の持ち時間として扱い、NetworkDelay を差し引く
 long long Job::budget_ms() const {
@@ -1041,6 +1093,64 @@ long long Job::budget_ms() const {
 void Job::ponder_hit() {
     const long long b = budget_ms();
     sh_.deadline_ms = b > 0 ? now_ms() + b : 0;
+}
+
+// kProbe（§E5.4、§E9.4）：窓 [T−1, T] で深さ順に読む。読み切った段の結論を、最後の結論とする
+void Job::run_probe(Game& game, std::vector<RootMove>& rm) {
+    const int t = lim_.probe_threshold;
+    Worker w(sh_, game, 0);
+    int done = 0;
+    int score = 0;
+    const int max_depth = sh_.max_depth.load();
+    for (int d = 1; d <= max_depth; d++) {
+        std::vector<RootMove> one = rm;
+        w.search_root(d, t - 1, t, 0, one);
+        if (sh_.stop.load(std::memory_order_relaxed)) break;
+        if (lim_.nodes > 0 && w.total_nodes() > lim_.nodes) break;  // 上限を超えて読み切った段は数えない
+        done = d;
+        score = one[0].score;
+    }
+    sh_.nodes.fetch_add(w.pending_, std::memory_order_relaxed);  // 数えていない節点を足す
+    w.pending_ = 0;
+    ProbeOut& p = probe_;
+    p.threshold = t;
+    p.depth = done;
+    p.score = score;
+    if (done > 0 && done >= lim_.probe_mindepth) {
+        p.verdict = score >= t ? 1 : 0;
+        // 咎める手順：この手を指した後の局面から、置換表の最善の応手を順にたどる（段は done まで）。
+        // 読み直しはしない（ゼロ幅の窓では読み筋が残らず、全幅で読み直すと予算を超えるため）
+        if (p.verdict == 0) {
+            Game after = game;
+            after.push(rm[0].move);
+            for (int i = 0; i < done; i++) {
+                TTEntry te;
+                if (!sh_.tt->probe(after.board.zobrist_key, te) || !te.has_move) break;
+                const std::string u = move_to_usi(te.move);
+                const std::vector<Move> legal = after.legal_moves();
+                auto it = std::find_if(legal.begin(), legal.end(), [&u](const Move& m) { return move_to_usi(m) == u; });
+                if (it == legal.end()) break;
+                p.pv.push_back(*it);
+                after.push(*it);
+            }
+        }
+    }
+    result_.assign(1, rm[0]);
+    result_[0].score = score;
+    result_[0].depth = done;
+    result_[0].bound = p.verdict == 1 ? kLower : kUpper;
+}
+
+// kMate（§E5.7）：df-pn で詰みを探す。見つからなかったときは unknown（否定は証明しない）
+void Job::run_mate(const Game& game) {
+    DfpnSearcher mate(&searching_, kDjpMateTableSize);
+    mate.set_max_nodes(lim_.nodes > 0 ? lim_.nodes : kDjpMateNodes);
+    const long long dl = sh_.deadline_ms.load();
+    if (dl > 0) mate.set_deadline_ms(dl);
+    if (!mate.search_mate(game.board)) return;
+    mate_pv_ = mate.get_mate_pv(game.board);
+    mate_found_ = !mate_pv_.empty();
+    if (mate_found_) best_move_ = mate_pv_[0];
 }
 
 void Job::run() {
@@ -1069,14 +1179,19 @@ void Job::run() {
         best_move_ = "win";
         return;
     }
+    if (lim_.mode == JobMode::kMate) {
+        run_mate(game);
+        return;
+    }
 
-    // 根の手（searchmoves で絞る。§E5.4）
+    // 根の手（searchmoves で絞り、exclude で除く。§E5.4）
     std::vector<RootMove> rm;
     for (const Move& m : game.legal_moves()) {
-        if (!lim_.searchmoves.empty()) {
-            const std::string u = move_to_usi(m);
-            if (std::find(lim_.searchmoves.begin(), lim_.searchmoves.end(), u) == lim_.searchmoves.end()) continue;
+        const std::string u = move_to_usi(m);
+        if (!lim_.searchmoves.empty() && std::find(lim_.searchmoves.begin(), lim_.searchmoves.end(), u) == lim_.searchmoves.end()) {
+            continue;
         }
+        if (std::find(lim_.excludemoves.begin(), lim_.excludemoves.end(), u) != lim_.excludemoves.end()) continue;
         RootMove r;
         r.move = m;
         rm.push_back(r);
@@ -1094,9 +1209,13 @@ void Job::run() {
         return;
     }
     best_move_ = move_to_usi(rm[0].move);
+    if (lim_.mode == JobMode::kProbe) {
+        run_probe(game, rm);
+        return;
+    }
 
     // 根の詰み探索（§E5.7）：短い時間（ノード数）だけ詰みを探し、見つかればその手で終える
-    if (!null_root_ && !lim_.ponder && (sh_.ev.net || sh_.ev.hk)) {
+    if (!null_root_ && !lim_.ponder && lim_.root_mate_probe && (sh_.ev.net || sh_.ev.hk)) {
         DfpnSearcher mate(&searching_, kMateProbeTableSize);  // 表はこの探索専用（共有の変数は使わない）
         mate.set_max_nodes(kMateProbeNodes);
         // 詰み探索は持ち時間の1割まで（締め切りが無い探索では 200ms まで）。決定的モードでは時間で止めない（§E5.9）
@@ -1122,6 +1241,9 @@ void Job::run() {
                              " score mate " + std::to_string(plies) + " nodes 0 nps 0 time " +
                              std::to_string(std::max<long long>(1, now_ms() - start)) + " pv " + usi);
                 }
+                if (sh_.root_report) {
+                    sh_.root_report(plies, result_, sh_.nodes.load(), std::max<long long>(1, now_ms() - start));
+                }
                 return;
             }
         }
@@ -1133,12 +1255,13 @@ void Job::run() {
     if (!sh_.opt.deterministic && pool_) helpers = std::max(0, std::min(threads - 1, pool_->size()));
 
     // helper（Lazy SMP）：置換表を共有して、段を変えて読む
-    std::atomic<int> helpers_left{helpers};
+    auto helpers_sync = std::make_shared<HelperSync>();
     for (int h = 1; h <= helpers; h++) {
-        pool_->submit([this, h, &helpers_left, &game, max_depth, rm]() mutable {
+        pool_->submit([this, h, helpers_sync, &game, max_depth, rm]() mutable {
+            if (!helpers_sync->enter()) return;
             Worker w(sh_, game, h);
             w.iterate(rm, max_depth, static_cast<const Reporter*>(nullptr));
-            helpers_left--;
+            helpers_sync->leave();
         });
     }
 
@@ -1147,11 +1270,9 @@ void Job::run() {
     std::vector<RootMove> main_rm = rm;
     main_worker.iterate(main_rm, max_depth, &report);
 
-    // 止めて、helper が終わるまで待つ
+    // 止めて、始まった helper が終わるまで待つ
     sh_.stop = true;
-    while (helpers_left.load() > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    helpers_sync->close();
 
     // bestmove の直前の info（§E7、N4.1）：最後に読み終えた深さの結果に、止めた時点の合計ノード数と時間を付けて出す
     if (!result_.empty() && sh_.sink) {
@@ -1176,6 +1297,16 @@ void Job::run() {
             ponder_move_ = move_to_usi(result_[0].pv[1]);
         }
     }
+}
+
+int qsearch_score(const Game& g, const EvalRef& ev) {
+    TranspositionTable tt;
+    tt.resize(1);
+    Job::Shared sh;
+    sh.tt = &tt;
+    sh.ev = ev;
+    Worker w(sh, g, 0);
+    return w.qsearch(-kInf, kInf, 0, 0);
 }
 
 }  // namespace search

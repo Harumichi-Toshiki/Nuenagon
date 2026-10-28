@@ -28,7 +28,10 @@ constexpr int kMateBound = kMate - kMaxPly;  // これ以上（以下）なら�
 
 enum Bound : int { kExact = 0, kLower = 1, kUpper = 2 };
 
-// USI の go の引数（§E2.1）
+// ジョブの種類（§E9.4）。search は通常の探索、probe は窓 [T−1, T] の検証、mate は詰み探索
+enum class JobMode { kSearch, kProbe, kMate };
+
+// USI の go の引数（§E2.1）。DJP のジョブも同じ形で制限を持つ
 struct Limits {
     long long btime = -1, wtime = -1, binc = 0, winc = 0, byoyomi = 0, movetime = 0;
     long long nodes = 0;
@@ -36,6 +39,12 @@ struct Limits {
     bool infinite = false;
     bool ponder = false;                   // go ponder：ponderhit まで時間を計らない（§E2.2）
     std::vector<std::string> searchmoves;  // 読む手（空なら全部）
+    std::vector<std::string> excludemoves; // 読まない手（DJP の exclude）
+    JobMode mode = JobMode::kSearch;
+    bool root_mate_probe = true;           // 根の詰み探索（短い時間の詰みの発見）を使うか。rank・probe は使わない
+    int probe_threshold = 0;               // kProbe：閾値 T（cp。手番側から見た値）
+    int probe_mindepth = 4;                // kProbe：この深さ未満の結論は unknown（§E9.4）
+    bool exact_all = false;                // rank：根の手すべての値を、同じ段で正確にする（MultiPV の k を手の数とした値）
 };
 
 // 設定（USI オプション §E2.3）
@@ -80,7 +89,11 @@ struct Options {
     bool search_counter_move = false;    // SearchCounterMove：カウンター手を並べ替えに使う
     bool search_qsee = false;            // SearchQSEE：静止探索で SEE が負の取る手を読まない（false なら N5 の簡易判定）
     bool search_lazy_legal = true;      // SearchLazyLegal：疑似合法手で生成し、指した後に自玉の安全を確かめる（false なら合法手で生成）
-    bool search_rfp_guard = true;       // SearchRFPGuard：相手の玉の逃げ道が1つ以下の節点では RFP を使わない（詰みを見落とさないため）
+    bool search_rfp_guard = false;      // SearchRFPGuard：相手の玉の逃げ道が1つ以下の節点では RFP を使わない（N5.5 の測定で効果が無いため既定は false）
+
+    // ヒントの使い方（DJP の hint_weight・hint_lmr_threshold。§E5.5）
+    double hint_weight = 1.0;           // 0 なら、ヒントを並べ替えにも LMR にも使わない
+    double hint_lmr_threshold = 0.10;   // この確率以上の手は、LMR で減らさない
 };
 
 // 評価に使う重み（どちらも nullptr なら評価できない）。Game が持つのと同じ重みを指す
@@ -174,6 +187,18 @@ private:
 // 出来事と情報の出力先（USI の info 行を1行ずつ渡す）
 using InfoSink = std::function<void(const std::string&)>;
 
+// 根の手ごとの値の報告（反復ごと。rm は並べ替え済み。Dajo の move の行に使う）
+using RootReport = std::function<void(int depth, const std::vector<RootMove>& rm, long long nodes, long long ms)>;
+
+// probe の結果（§E9.4）。verdict は 1＝yes（下限 ≥ T）、0＝no（上限 < T）、-1＝unknown
+struct ProbeOut {
+    int verdict = -1;
+    int threshold = 0;
+    int score = 0;          // 最後に読み切った段の値（手番側から見た内部の単位）
+    int depth = 0;          // 最後に読み切った段
+    std::vector<Move> pv;   // no のとき：この手を指した後の、相手の咎める手順（手は含まない）
+};
+
 // 1つのジョブ（§E5.2）。局面・制限・設定を持ち、Run で探索する。USI の go はジョブ番号0として扱う。
 class Job {
 public:
@@ -189,21 +214,34 @@ public:
     const std::string& best_move() const { return best_move_; }      // "resign"・"win"・手
     const std::string& ponder_move() const { return ponder_move_; }  // 空なら無し
     const std::vector<RootMove>& result() const { return result_; }
+    const ProbeOut& probe() const { return probe_; }                 // kProbe の結果
+    bool mate_found() const { return mate_found_; }                   // kMate：詰みを見つけたか
+    const std::vector<std::string>& mate_pv() const { return mate_pv_; }  // kMate：詰みの手順（USI）
+
+    void set_root_report(RootReport f) { sh_.root_report = std::move(f); }
+    // 動いているジョブの上限を後から付ける（DJP の promote）。time・nodes は今からの量、depth は最大の深さ
+    void extend(long long time_ms, long long nodes, int depth);
 
     // 内部の共有状態（Worker から参照する）
     struct Shared {
         std::atomic<bool> stop{false};
         std::atomic<long long> deadline_ms{0};  // 0 は時間の制限なし
         std::atomic<long long> nodes{0};
-        long long node_limit = 0;
+        std::atomic<long long> node_limit{0};   // 0 は無し（promote で変わるので atomic）
+        std::atomic<int> max_depth{kMaxDepth};  // 反復深化の上限（promote で変わる）
         TranspositionTable* tt = nullptr;
         const HintTable* hints = nullptr;
         Options opt;
         EvalRef ev;
         InfoSink sink;
+        RootReport root_report;
+        bool exact_all = false;                 // rank：この段で正確な値を得た手の値を、上限の値で上書きしない
+        bool no_tt_read = false;                // probe：置換表の結論を読まない（他のジョブの深い結論に頼らず、自分の節点数で読む）
     };
 private:
     long long budget_ms() const;   // 今の制限から思考時間（ms）を求める。制限なしは -1（§E2.4 の NetworkDelay を差し引く）
+    void run_probe(Game& game, std::vector<RootMove>& rm);  // kProbe：窓 [T−1, T] で深さ順に読む
+    void run_mate(const Game& game);                         // kMate：df-pn で詰みを探す
 
     std::atomic<bool> searching_{true};  // 根の詰み探索の続行（stop で false になる。詰み探索はこの合図を見る）
     Game root_;
@@ -214,6 +252,13 @@ private:
     std::vector<RootMove> result_;
     std::string best_move_ = "resign";
     std::string ponder_move_;
+    ProbeOut probe_;
+    bool mate_found_ = false;
+    std::vector<std::string> mate_pv_;
 };
+
+// 局面の評価（静的評価。qsearch なら静止探索の値）。内部の単位（手番側から見た cp。詰みは含みうる）。
+// 置換表は一時的なものを使う（DJP の eval のジョブ）
+int qsearch_score(const Game& g, const EvalRef& ev);
 
 }  // namespace search
