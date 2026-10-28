@@ -56,6 +56,7 @@ const SearchSpin kSearchSpins[] = {
     {"SearchRazorMargin", &search::Options::search_razor_margin, 0, 1000},
     {"SearchFutilityMargin", &search::Options::search_futility_margin, 0, 1000},
     {"SearchSEEMargin", &search::Options::search_see_margin, 0, 500},
+    {"SearchRFPDepth", &search::Options::search_rfp_depth, 0, 20},
 };
 
 const SearchFlag kSearchFlags[] = {

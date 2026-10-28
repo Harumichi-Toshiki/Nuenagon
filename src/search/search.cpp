@@ -690,7 +690,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     }
 
     // reverse futility（RFP）：評価が β を大きく超えているなら、浅い探索を省いてそのまま返す
-    if (o.search_rfp && prune_ok && depth <= 7 && std::abs(beta) < kMateBound && !(o.search_rfp_guard && king_boxed()) &&
+    if (o.search_rfp && prune_ok && depth <= o.search_rfp_depth && std::abs(beta) < kMateBound && !(o.search_rfp_guard && king_boxed()) &&
         static_eval - o.search_rfp_margin * depth + (improving ? 60 : 0) >= beta) {
         return static_eval;
     }
