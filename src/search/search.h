@@ -79,6 +79,7 @@ struct Options {
     bool search_counter_move = false;    // SearchCounterMove：カウンター手を並べ替えに使う
     bool search_qsee = false;            // SearchQSEE：静止探索で SEE が負の取る手を読まない（false なら N5 の簡易判定）
     bool search_lazy_legal = true;      // SearchLazyLegal：疑似合法手で生成し、指した後に自玉の安全を確かめる（false なら合法手で生成）
+    bool search_rfp_guard = true;       // SearchRFPGuard：相手の玉の逃げ道が1つ以下の節点では RFP を使わない（詰みを見落とさないため）
 };
 
 // 評価に使う重み（どちらも nullptr なら評価できない）。Game が持つのと同じ重みを指す

@@ -296,6 +296,7 @@ public:
     bool find_mate1(const Move* moves, int n, Move& out) const;  // 1手で詰む手（§E11。自玉の安全と、詰みを確かめる）
     bool has_reply() const;                       // 今の局面（手番側）に合法手があるか（打ち歩詰めの判定）
     bool quiet_drop_far(const Move& m) const;     // 打つ手が、両方の玉から遠く、どの駒にも利かないか（目安）
+    bool king_boxed() const;                      // 相手の玉の逃げ道が1つ以下か（詰みが近い節点の目安）
     Move pv_at(int ply, int i) const { return pv_[ply * kMaxPly + i]; }
     void set_pv(int ply, const Move& m);
 
@@ -495,6 +496,26 @@ bool Worker::quiet_drop_far(const Move& m) const {
     return true;
 }
 
+// 相手の玉の逃げ道（隣で、相手の駒がなく、こちらの利きも無いマス）が1つ以下か。
+// 玉が囲まれている節点では、静的評価が詰みを隠すので、RFP は使わない（SearchRFPGuard）。
+bool Worker::king_boxed() const {
+    const Board& b = game_.board;
+    const int us = b.turn, them = 1 - us;
+    const int k = b.king_sq[them];
+    if (k < 0) return false;
+    int flights = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            const int x = k % 9 + dx, y = k / 9 + dy;
+            if ((!dx && !dy) || x < 0 || x > 8 || y < 0 || y > 8) continue;
+            const int sq = y * 9 + x;
+            if (b.pieces[sq] && ((b.pieces[sq] > 16) ? WHITE : BLACK) == them) continue;
+            if (!b.is_attacked(sq, us) && ++flights > 1) return false;
+        }
+    }
+    return true;
+}
+
 // 1手詰め（§E11）：王手をかける手で、相手の玉が逃げられず、取られず、合駒もできない手を探す。
 // 静的な判定で候補を絞る（逃げ道が 3 つ以上あれば、1手では詰まないとみなす。王手になりうる手だけを見る）。
 // 見つけた手は、自玉の安全と詰みを正確に確かめるので、詰みでない手を詰みとは返さない。
@@ -669,7 +690,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     }
 
     // reverse futility（RFP）：評価が β を大きく超えているなら、浅い探索を省いてそのまま返す
-    if (o.search_rfp && prune_ok && depth <= 7 && std::abs(beta) < kMateBound &&
+    if (o.search_rfp && prune_ok && depth <= 7 && std::abs(beta) < kMateBound && !(o.search_rfp_guard && king_boxed()) &&
         static_eval - o.search_rfp_margin * depth + (improving ? 60 : 0) >= beta) {
         return static_eval;
     }

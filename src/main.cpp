@@ -75,6 +75,7 @@ const SearchFlag kSearchFlags[] = {
     {"SearchCounterMove", &search::Options::search_counter_move},
     {"SearchQSEE", &search::Options::search_qsee},
     {"SearchLazyLegal", &search::Options::search_lazy_legal},
+    {"SearchRFPGuard", &search::Options::search_rfp_guard},
 };
 
 // 評価関数の設定（USI オプション §E2.3）と、読み込んだ重み
