@@ -296,6 +296,7 @@ public:
     bool find_mate1(const Move* moves, int n, Move& out) const;  // 1手で詰む手（§E11。自玉の安全と、詰みを確かめる）
     bool has_reply() const;                       // 今の局面（手番側）に合法手があるか（打ち歩詰めの判定）
     bool quiet_drop_far(const Move& m) const;     // 打つ手が、両方の玉から遠く、どの駒にも利かないか（目安）
+    bool king_boxed() const;                      // 相手の玉の逃げ道が1つ以下か（詰みが近い節点の目安）
     Move pv_at(int ply, int i) const { return pv_[ply * kMaxPly + i]; }
     void set_pv(int ply, const Move& m);
 
@@ -425,6 +426,7 @@ int Worker::order_score(const Move& m, const Move& tt_move, bool has_tt, int ply
     if (is_capture(b, m)) {
         const int victim = kPieceValue[b.pieces[m.to] & 15];
         const int attacker = kPieceValue[b.pieces[m.from] & 15];
+        if (!sh_.opt.search_order_see) return (1 << 28) + victim * 8 - attacker / 8;
         if (see(m) >= 0) return (1 << 28) + victim * 8 - attacker / 8;
         return -(1 << 29) + victim * 8 - attacker / 8;
     }
@@ -435,7 +437,7 @@ int Worker::order_score(const Move& m, const Move& tt_move, bool has_tt, int ply
         }
     }
     if (same_move(killers_[ply][0], m) || same_move(killers_[ply][1], m)) return 1 << 25;
-    if (cur_key_[ply] >= 0 && same_move(counter_[cur_key_[ply]], m)) return 1 << 25;
+    if (sh_.opt.search_counter_move && cur_key_[ply] >= 0 && same_move(counter_[cur_key_[ply]], m)) return 1 << 25;
     return quiet_score(m, ply);
 }
 
@@ -454,7 +456,12 @@ void Worker::record_quiet_cutoff(const Move& m, int depth, int ply, const Move* 
         killers_[ply][1] = killers_[ply][0];
         killers_[ply][0] = m;
     }
-    if (cur_key_[ply] >= 0) counter_[cur_key_[ply]] = m;
+    if (sh_.opt.search_counter_move && cur_key_[ply] >= 0) counter_[cur_key_[ply]] = m;
+    if (!sh_.opt.search_history_gravity) {  // N5 の履歴（加算のみ。試した手の減点はしない）
+        int& h = history_[(game_.board.turn * kHistSize + hist_index(m)) * 81 + m.to];
+        h = std::min(h + depth * depth, 1 << 20);
+        return;
+    }
     const int bonus = std::min(depth * depth, 1600);
     update_quiet(m, bonus, ply);
     for (int i = 0; i < nq; i++) update_quiet(quiets[i], -bonus, ply);
@@ -485,6 +492,26 @@ bool Worker::quiet_drop_far(const Move& m) const {
         if (!v || ((v > 16) ? WHITE : BLACK) != them) continue;
         // 同じ筋・段・斜め、または近くに相手の駒があれば、利くかもしれないとみなす
         if (near_line(sq, tx, ty)) return false;
+    }
+    return true;
+}
+
+// 相手の玉の逃げ道（隣で、相手の駒がなく、こちらの利きも無いマス）が1つ以下か。
+// 玉が囲まれている節点では、静的評価が詰みを隠すので、RFP は使わない（SearchRFPGuard）。
+bool Worker::king_boxed() const {
+    const Board& b = game_.board;
+    const int us = b.turn, them = 1 - us;
+    const int k = b.king_sq[them];
+    if (k < 0) return false;
+    int flights = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            const int x = k % 9 + dx, y = k / 9 + dy;
+            if ((!dx && !dy) || x < 0 || x > 8 || y < 0 || y > 8) continue;
+            const int sq = y * 9 + x;
+            if (b.pieces[sq] && ((b.pieces[sq] > 16) ? WHITE : BLACK) == them) continue;
+            if (!b.is_attacked(sq, us) && ++flights > 1) return false;
+        }
     }
     return true;
 }
@@ -556,13 +583,20 @@ int Worker::qsearch(int alpha, int beta, int ply, int qd) {
         if (stand >= beta) return stand;
         if (stand > alpha) alpha = stand;
         best = stand;
-        const int all = (int)(game_.gen_pseudo(moves) - moves);
+        const int all = sh_.opt.search_lazy_legal ? (int)(game_.gen_pseudo(moves) - moves)
+                                              : (int)(game_.gen_legal(moves) - moves);
         for (int i = 0; i < all; i++) {
             const Move m = moves[i];
             if (!is_capture(game_.board, m)) continue;
             const int victim = kPieceValue[game_.board.pieces[m.to] & 15];
+            const int attacker = kPieceValue[game_.board.pieces[m.from] & 15];
             if (stand + victim * 3 / 2 + 200 <= alpha) continue;  // delta pruning
-            if (see(m) < 0) continue;                             // 損な取り（SEE が負）は読まない
+            if (sh_.opt.search_qsee) {
+                if (see(m) < 0) continue;  // 損な取り（SEE が負）は読まない
+            }
+            else if (victim < attacker && game_.board.is_attacked(m.to, 1 - game_.board.turn)) {
+                continue;  // N5 の簡易判定：安い駒で高い駒を取って、そのマスに取り返される手
+            }
             moves[n++] = m;
         }
     }
@@ -656,7 +690,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     }
 
     // reverse futility（RFP）：評価が β を大きく超えているなら、浅い探索を省いてそのまま返す
-    if (o.search_rfp && prune_ok && depth <= 7 && std::abs(beta) < kMateBound &&
+    if (o.search_rfp && prune_ok && depth <= o.search_rfp_depth && std::abs(beta) < kMateBound && !(o.search_rfp_guard && king_boxed()) &&
         static_eval - o.search_rfp_margin * depth + (improving ? 60 : 0) >= beta) {
         return static_eval;
     }
@@ -685,7 +719,8 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     MoveBuf& mb = buf_[ply];
     Move* moves = mb.moves;
     int* score = mb.score;
-    const int n = in_check ? (int)(game_.gen_legal(moves) - moves) : (int)(game_.gen_pseudo(moves) - moves);
+    const int n = (in_check || !o.search_lazy_legal) ? (int)(game_.gen_legal(moves) - moves)
+                                                     : (int)(game_.gen_pseudo(moves) - moves);
     if (n == 0) return -(kMate - ply);  // 手が無い＝負け（王手されていれば詰み）
 
     // 1手詰め（§E11）：王手で詰む手があれば、その値を返す（TT には入れない）
@@ -716,16 +751,18 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
         const bool capture = is_capture(game_.board, m);
         const bool quiet = !capture && !m.is_promote;
 
-        // 王手になりうる手は枝刈りしない（王手で詰む手を、静かな手として刈らないため）
+        // 枝刈り（PV でなく王手を受けていない局面で、最初の合法手の後。最善が詰まされる値のときは読む）
+        if (prune_ok && legal > 0 && best > -kMateBound) {
+            if (quiet && depth <= 3 && static_eval + o.search_futility_margin * depth <= alpha) continue;  // futility（N4.1）
+            if (quiet && !o.search_lmp && depth <= 3 && legal >= 6 + 3 * depth * depth) continue;  // 手の数（N4.1）
+        }
+        // 新しい枝刈りは、王手になりうる手には使わない（王手で詰む手を、静かな手として刈らないため）
         const int opp_k = game_.board.king_sq[1 - game_.board.turn];
         const bool maybe_check = opp_k >= 0 && (near_line(m.to, opp_k % 9, opp_k / 9) ||
                                                 (!m.is_drop && near_line(m.from, opp_k % 9, opp_k / 9)));
-        // 枝刈り（PV でなく王手を受けていない局面で、最初の合法手の後。最善が詰まされる値のときは読む）
         if (prune_ok && legal > 0 && best > -kMateBound && !maybe_check) {
-            if (quiet && depth <= 3 && static_eval + o.search_futility_margin * depth <= alpha) continue;  // futility（N4.1）
             if (quiet && o.search_lmp && depth <= 8 &&
                 legal >= o.search_lmp_scale * (3 + depth * depth) / (improving ? 1 : 2)) continue;  // LMP
-            if (quiet && !o.search_lmp && depth <= 3 && legal >= 6 + 3 * depth * depth) continue;  // 手の数（N4.1）
             if (o.search_drop_prune && depth <= 2 && m.is_drop && quiet_drop_far(m)) continue;
             if (o.search_see_prune && depth <= 6) {
                 // 相手の利きが無いマスへの静かな手は、SEE が 0 なので調べない
@@ -766,8 +803,8 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
                     if (pv_node) red--;
                     red -= std::clamp(hs / 8192, -2, 2);  // 履歴の良い手は減らし、悪い手は増やす
                 }
-                else if (legal >= 3) {
-                    red = legal >= 6 ? 2 : 1;
+                else if (legal >= 4) {  // N5 の決まり：0 から数えて 3 番目以降の静かな手（legal は 1 から数える）
+                    red = legal >= 7 ? 2 : 1;
                 }
                 if (red > 0 && hint) {
                     for (const HintEntry& h : *hint) {
@@ -790,7 +827,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
                 alpha = s;
                 if (pv_node) set_pv(ply, m);
                 if (alpha >= beta) {
-                    if (quiet) record_quiet_cutoff(m, depth, ply, quiets, nq);
+                    if (!capture) record_quiet_cutoff(m, depth, ply, quiets, nq);
                     break;
                 }
             }

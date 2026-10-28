@@ -56,6 +56,7 @@ const SearchSpin kSearchSpins[] = {
     {"SearchRazorMargin", &search::Options::search_razor_margin, 0, 1000},
     {"SearchFutilityMargin", &search::Options::search_futility_margin, 0, 1000},
     {"SearchSEEMargin", &search::Options::search_see_margin, 0, 500},
+    {"SearchRFPDepth", &search::Options::search_rfp_depth, 0, 20},
 };
 
 const SearchFlag kSearchFlags[] = {
@@ -70,6 +71,12 @@ const SearchFlag kSearchFlags[] = {
     {"SearchIIR", &search::Options::search_iir},
     {"SearchImproving", &search::Options::search_improving},
     {"SearchRazoring", &search::Options::search_razoring},
+    {"SearchOrderSEE", &search::Options::search_order_see},
+    {"SearchHistoryGravity", &search::Options::search_history_gravity},
+    {"SearchCounterMove", &search::Options::search_counter_move},
+    {"SearchQSEE", &search::Options::search_qsee},
+    {"SearchLazyLegal", &search::Options::search_lazy_legal},
+    {"SearchRFPGuard", &search::Options::search_rfp_guard},
 };
 
 // 評価関数の設定（USI オプション §E2.3）と、読み込んだ重み

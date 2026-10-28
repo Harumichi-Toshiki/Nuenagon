@@ -62,9 +62,9 @@ struct Options {
     bool search_cont_hist = true;       // SearchContHistory：連続履歴（直前の手・2手前の手との組み合わせ）を並べ替えに使う
     bool search_mate1 = true;           // SearchMate1Ply：各節点で、1手で詰む手（王手）を調べる
     bool search_drop_prune = true;      // SearchDropPrune：浅い深さで、玉から遠く、どの駒にも利かない打つ手を刈る
-    bool search_iir = true;             // SearchIIR：置換表に手が無いとき、1手浅く読む
-    bool search_improving = true;       // SearchImproving：評価値が2手前より上がっているかで、枝刈りを調整する
-    bool search_razoring = true;        // SearchRazoring：浅い深さで評価値が α を大きく下回るとき、静止探索で返す
+    bool search_iir = false;             // SearchIIR：置換表に手が無いとき、1手浅く読む
+    bool search_improving = false;       // SearchImproving：評価値が2手前より上がっているかで、枝刈りを調整する
+    bool search_razoring = false;        // SearchRazoring：浅い深さで評価値が α を大きく下回るとき、静止探索で返す
 
     // 枝刈りの幅（USI の spin。持ち主が評価関数に合わせて調整する。点数は内部の単位。material_v0 は歩 約270点）
     int search_rfp_margin = 180;        // SearchRFPMargin：RFP の深さ1あたりの余裕
@@ -72,6 +72,15 @@ struct Options {
     int search_razor_margin = 300;      // SearchRazorMargin：razoring の深さ1あたりの余裕
     int search_futility_margin = 250;   // SearchFutilityMargin：futility の深さ1あたりの余裕
     int search_see_margin = 40;         // SearchSEEMargin：SEE 枝刈りの静かな手の閾値（深さ1あたり）
+    int search_rfp_depth = 3;           // SearchRFPDepth：RFP を使う最大の深さ（7 は長い詰将棋を 13 問に減らす。3 なら 16 問）
+
+    // 並べ替え・静止探索の入り切り（既定は true。false なら N5H と同じ動き）
+    bool search_order_see = true;       // SearchOrderSEE：駒を取る手を SEE で分ける（false なら MVV-LVA）
+    bool search_history_gravity = false; // SearchHistoryGravity：履歴を減衰つきで更新し、試した静かな手を減点する（false なら加算のみ）
+    bool search_counter_move = false;    // SearchCounterMove：カウンター手を並べ替えに使う
+    bool search_qsee = false;            // SearchQSEE：静止探索で SEE が負の取る手を読まない（false なら N5 の簡易判定）
+    bool search_lazy_legal = true;      // SearchLazyLegal：疑似合法手で生成し、指した後に自玉の安全を確かめる（false なら合法手で生成）
+    bool search_rfp_guard = true;       // SearchRFPGuard：相手の玉の逃げ道が1つ以下の節点では RFP を使わない（詰みを見落とさないため）
 };
 
 // 評価に使う重み（どちらも nullptr なら評価できない）。Game が持つのと同じ重みを指す
