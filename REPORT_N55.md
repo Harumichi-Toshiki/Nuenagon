@@ -88,3 +88,49 @@
 ## `python check_protected.py` の結果
 
 `OK`
+
+## 追記（N5.5f：詰将棋の退化の修正）
+
+### 手順1：キット N5.5f の導入
+- zip は `main` にあり、SHA-256 一致。KIT.json の 3 ファイルも一致。コミット「Install kit N5.5f」。
+- 作業ブランチには zip が無いため、削除は無し（zip は `main` だけにある）。
+
+### 手順2：詰将棋（9 手以上の 17 問、Threads=1、movetime 3000、学習済み RayPair）
+
+直列で測った解けた数：
+
+| 設定 | 解けた数 |
+|---|---|
+| N5H | 16 |
+| 既定（修正前） | 13 |
+| RFP を切る | 16 |
+| LMP を切る | 14 |
+| LMRTable・SEEPrune・ContHistory・Mate1Ply・DropPrune・IIR・Improving・Razoring・OrderSEE・HistoryGravity・CounterMove・QSEE・LazyLegal を1つずつ切る | 13（変化なし） |
+| NullMoveDynamic を切る | 12 |
+
+- 原因：**RFP（静的評価による早い打ち切り）**。玉が囲まれた局面では、静的評価が詰みを隠す。
+- 試した直し方：
+  - RFP の余裕を大きくする（SearchRFPMargin 300・500）→ 14 問。部分的にしか直らない。
+  - 相手の玉の逃げ道が1つ以下のときだけ RFP を使わない（`SearchRFPGuard`）→ 13 問。効かない（取りこぼす局面は玉の逃げ道が多い）。
+  - **RFP を深さ 3 以下だけで使う（`SearchRFPDepth`）→ 16 問**（深さ 1 でも 16 問）。
+
+### 最終の既定値
+- RFP の深さ：**3**（前は 7）。
+- 100 局（先の決定：既定の 4 つ（NullMoveDynamic・Mate1Ply・ContHistory・DropPrune）は既定 true のまま）：RFP 深さ 3 対 7 は **0.560（56 勝 44 敗）**。深さ（1 手 1 秒）は 9.83 対 9.92（差 0.09）。
+- その他の既定：RFP・LMP・OrderSEE・SEEPrune・LazyLegal・LMRTable・RFPGuard・NullMoveDynamic・Mate1Ply・ContHistory・DropPrune は true。IIR・Improving・Razoring・HistoryGravity・CounterMove・QSEE は false。
+- 新しい `Search*` オプション：`SearchRFPGuard`（既定 true。効果なし。残すかは持ち主が決める）、`SearchRFPDepth`（既定 3）。
+
+### テスト
+- `python -m pytest -q tests`：**109 passed**（1239 秒）。深さ・強さ・詰将棋の各テストを含む（テスト出力の数値は `-s` が無いため省略）。
+  - 手測の深さ（1 手 1 秒、12 局面）：N5H 8.00 対 新 9.83（+1.83。基準 +1.5）。
+- `python check_protected.py`：OK
+
+### 引き継ぎ
+1. 「既定 true の 4 つ」（NullMoveDynamic・Mate1Ply・ContHistory・DropPrune）は、測定で効かないか弱い。テスト `test_required_options` が既定 true を要求するため、そのまま残してある。持ち主が判断する。
+2. `SearchRFPGuard` は効果が無かった。削除するか、持ち主が決める。
+3. 測定の数値は 100 局以上で。60 局の結果は ±0.06 のずれがある。
+4. 詰将棋の確認は直列で行うこと（4 並列だと 3 秒の制限で取りこぼす）。
+
+## `python check_protected.py` の結果
+
+`OK`
