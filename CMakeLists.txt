@@ -16,6 +16,7 @@ add_executable(nuenagon
   src/eval/raypair/raypair.cpp
   src/eval/raypair/network.cpp
   src/search/search.cpp
+  src/dajo/dajo.cpp
   src/platform/cpu_affinity.cpp
   src/platform/file_util.cpp
   src/eval/halfkp/halfkp.cpp

@@ -20,6 +20,7 @@
 #include "platform/cpu_affinity.h"
 #include "platform/file_util.h"
 #include "search/search.h"
+#include "dajo/dajo.h"
 
 namespace {
 
@@ -425,7 +426,7 @@ void cmd_evalbench(Game& game, const EvalState& ev, std::istringstream& in) {
 struct Engine {
     search::Options opt;
     search::TranspositionTable tt;
-    search::HintTable hints;
+    std::shared_ptr<search::HintTable> hints = std::make_shared<search::HintTable>();  // ジョブは作った時点の複製を見る（§E5.5）
     cpu::Topology topo = cpu::query_topology();  // CPU の構成（起動時に一度だけ調べる。§E2.4）
     std::string cpu_error;                       // CpuAffinity の指定の問題（あれば）
     std::unique_ptr<search::ThreadPool> pool;
@@ -484,7 +485,8 @@ std::string cpu_info_line(const Engine& e) {
 }
 
 // go <引数…>（§E2.1）。ジョブ番号0として起動する
-void cmd_go(Engine& e, const EvalState& ev, const Game& game, std::istringstream& in) {
+// dajo_busy なら、DJP のジョブがスレッドプールと置換表を使っているので、作り直さない
+void cmd_go(Engine& e, const EvalState& ev, const Game& game, std::istringstream& in, bool dajo_busy) {
     e.stop_job();
     search::Limits lim;
     auto num = [&in]() {
@@ -518,10 +520,10 @@ void cmd_go(Engine& e, const EvalState& ev, const Game& game, std::istringstream
         return;
     }
 
-    apply_config(e);
+    if (!dajo_busy) apply_config(e);
     e.tt.new_generation();  // 世代を進める（§E5.3）
     const search::EvalRef ref = make_ref(ev);
-    auto job = std::make_shared<search::Job>(game, lim, e.opt, ref, e.tt, e.pool.get(), &e.hints, false,
+    auto job = std::make_shared<search::Job>(game, lim, e.opt, ref, e.tt, e.pool.get(), e.hints.get(), false,
                                              [](const std::string& s) { reply(s); });
     e.job = job;
     e.driver = std::thread([job] {
@@ -585,13 +587,39 @@ int main() {
     Engine eng;
     DfpnSearcher mate_search(&g_searching);
 
+    // Dajo（DJP v0）の窓口。USI と同じ設定・置換表・プールを使う（§E9）。Engine より後に作り、先に壊す
+    dajo::Host host;
+    host.opt = &eng.opt;
+    host.tt = &eng.tt;
+    host.hints = &eng.hints;
+    host.pool = [&eng] { return eng.pool.get(); };
+    host.reconfigure = [&eng] { apply_config(eng); };
+    host.eval = [&ev] {
+        search::EvalRef r;
+        if (ev.loaded) r = make_ref(ev);
+        return r;
+    };
+    host.sysinfo = [&eng] {
+        std::ostringstream o;
+        o << "logical=" << eng.topo.logical << " physical=" << eng.topo.physical << " numa=unknown simd="
+          << (NUENAGON_SIMD_AVX2 ? "avx2" : "scalar") << " threads=" << eng.opt.threads
+          << " affinity=" << eng.opt.cpu_affinity;
+        return o.str();
+    };
+    host.out = [](const std::string& s) { reply(s); };
+    dajo::Dajo djp(host);
+
     std::string line;
     while (std::getline(std::cin, line)) {
         std::istringstream in(line);
         std::string cmd;
         in >> cmd;
+        djp.reap();
 
-        if (cmd == "usi") {
+        if (cmd == "dajo") {
+            djp.handle(line);  // DJP の命令（hello の前は、hello だけを処理する）
+        }
+        else if (cmd == "usi") {
             reply("id name Nuenagon");
             reply("id author Harumichi-Toshiki");
             reply("option name Threads type spin default 4 min 1 max 256");
@@ -620,10 +648,12 @@ int main() {
             reply("usiok");
         }
         else if (cmd == "setoption") {
+            djp.cancel_all();  // 設定が変わるので、DJP のジョブは止める
             eng.stop_job();
             cmd_setoption(ev, eng.opt, in);
         }
         else if (cmd == "isready") {
+            djp.cancel_all();  // 重みを読み直すので、DJP のジョブは止めて終わるまで待つ
             eng.stop_job();
             if (cmd_isready(game, ev)) {
                 apply_config(eng);
@@ -634,10 +664,10 @@ int main() {
         else if (cmd == "usinewgame") {
             eng.stop_job();
             eng.tt.clear();   // 新しい対局：置換表と、ヒントの表を消す（§E5.3、§E5.5）
-            eng.hints.clear();
+            eng.hints = std::make_shared<search::HintTable>();
         }
         else if (cmd == "go") {
-            cmd_go(eng, ev, game, in);
+            cmd_go(eng, ev, game, in, djp.busy());
         }
         else if (cmd == "stop") {
             if (eng.job) eng.job->stop();  // bestmove は探索のスレッドが出す
