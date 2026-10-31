@@ -1,6 +1,10 @@
 # N6 報告：Dajo プロトコル DJP v0（設計書 §E9）
 
-## 結果：中断（停止条件 5：受け入れテストの期待と、設計（§E9.4・§E9.8）の解釈が食い違う。`test_probe_verdicts` の 1 件）
+## 結果：完了（キット N6d で受け入れテスト 17 件すべて通過。下の「追記（N6d）」を参照）
+
+以下は、最初の担当の報告（中断時点）です。
+
+## 結果（中断時点）：中断（停止条件 5：受け入れテストの期待と、設計（§E9.4・§E9.8）の解釈が食い違う。`test_probe_verdicts` の 1 件）
 
 - 実装は、DJP v0 の命令・ジョブ（`search`・`rank`・`probe`・`threat`・`mate`・`eval`）・スレッドの割り当て・`cancel`・`promote`・`hint` まで作った。
 - `tests/test_n6_acceptance.py`：**16 件通過、1 件失敗**（`test_probe_verdicts`。下の「中断の理由」）。
@@ -111,3 +115,65 @@ probe move=5h5d threshold=0 nodes=30 mindepth=4 → 期待 verdict=unknown
 4. `dajo set threads` は、ジョブが動いていれば保留される。合議が配分を変えるとき（相手の手番中に ponder を増やす等）は、ジョブを止めてから `set` を送る。
 5. ponder（§E9.4 の `promote`）は、`search infinite=1` を投げたあと、予想が当たったら `promote time=…` を送る。相手の予想手の局面は、ジョブごとに別の `job` で送る（局面はジョブが持つ）。
 6. `dajo newgame` は置換表を空にする。合議の局面の切り替えには、対局の区切りでだけ使うこと（毎手は使わない）。
+
+---
+
+## 追記（N6d：完了）
+
+### 結果：完了
+
+- `python -m pytest -q tests`（強さのテスト `test_strength_vs_n5h` を含む）：**126 passed in 1205.56s**（N5.5 の 109 件 + N6 の 17 件）。
+- `python -m pytest -q tests/test_n6_acceptance.py`：**17 passed**。
+- `python check_protected.py`：`OK`。
+
+### 手順
+
+1. キット N6d：`main` の `nuenagon_kit_n6d.zip`（SHA-256 一致）を `git show` で取り出して作業用ディレクトリで展開し、KIT.json の 2 ファイル（`PROTECTED.sha256`・`tests/test_n6_acceptance.py`）の SHA-256 を確かめてからコピー。作業ブランチ直下には zip が無かったので削除するものは無し。コミット「Install kit N6d」（`d49d3a7`）。
+- `test_probe_verdicts` のジョブ 75 は、`mindepth` を深さの上限で確かめる形に直り、ジョブ 76 が足された。
+
+### `probe` の置換表の扱い
+
+- 前回の「置換表を読まない」変更を元に戻した（`Limits`／`Job` の `no_tt_read` を削除、`negamax`・`qsearch` の置換表の読み取りを元の条件に戻した）。書くのは従来どおり。コミット `989b4f1`。
+- 読み筋（`pv`）は、前回の対応のまま、この手を指した後の局面から置換表の最善の応手をたどる。
+
+### `nodes=N` のときの result の `nodes`
+
+測定（`probe move=… threshold=0 mindepth=1`、結果の `nodes` は読み切った段までの合計で、最後に途中まで読んだ段の節点を含む）：
+
+| 局面 | N | verdict | depth | result の nodes |
+|---|---|---|---|---|
+| 飛車（BLUNDER） | 30 | no | 6 | 32 |
+| 飛車 | 100 | no | 13 | 118 |
+| 飛車 | 1000 | no | 29 | 1024 |
+| 飛車 | 10000 | no | 60 | 7068 |
+| 飛車 | 100000 | no | 60 | 61（置換表の再利用で少ない節点で深さ 60 まで） |
+| 平手（7g7f） | 30 | no | 2 | 57 |
+| 平手 | 100 | no | 4 | 171 |
+| 平手 | 1000 | no | 6 | 1024 |
+| 平手 | 10000 | no | 8 | 10240 |
+| 平手 | 100000 | no | 10 | 100352 |
+
+- 超過は、予算を超えたあとに読み終えた段の節点（検査は 1024 節点ごとに行うため、超過は約 1024 節点以内）。N が小さいと相対的に大きく見える（平手 N=30 → 57）。
+- 直していない。「大きく超える」ものは見当たらず、数十節点の超過は、判断のとおり許容した。
+
+### caps
+
+- 変更なし：`search,rank,probe,threat,mate,eval,hint,promote,sysinfo`。
+- `watch` と `dajo info` は作っていない（時間があれば、の項目。全体テストを 2 回回す必要があるため、今回は見送った）。
+
+### 今回の差分（前回の報告からの変更）
+
+- `PROTECTED.sha256`・`tests/test_n6_acceptance.py`：キット N6d の 2 ファイル（コミット `d49d3a7`）。
+- `src/search/search.h`・`src/search/search.cpp`：`no_tt_read` の削除（コミット `989b4f1`）。
+- `REPORT_N6.md`：この追記。
+
+### 次の担当への引き継ぎ（残っている既知の制限）
+
+1. 予算の検査は、1024 節点ごと（`aborted()`）と段の終わりに行う。N が小さいと、最後に読んだ段の超過が目立つ。厳密に止めるには、`probe` だけ節点ごとに検査する仕組みが要る（探索の検査は変えていない）。
+2. `mate` は `no` を返さない（df-pn は否定を証明しない）。見つからなければ `unknown`。
+3. `dajo set threads`・`affinity`・`physical_only`・`hash` は、ジョブが動いているあいだは反映を保留する（§E9.5 の「次の反復から」は未実装）。
+4. `newgame` は置換表を空にする。
+5. 実行中の DJP ジョブがプールを占めると、USI の `go` の helper は始まらないことがある（本体は待たない）。
+6. `watch`・`dajo info`・`dajo event` は未実装。
+7. `rank` の途中の段の行は、値が揃っていないことがある。確定値は `result` の直前の行。
+8. 合議の中継では、ponder は `search infinite=1` と `promote time=…` で作る。局面はジョブごとに送る。
