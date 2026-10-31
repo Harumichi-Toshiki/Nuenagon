@@ -437,9 +437,16 @@ def test_probe_verdicts(djp):
     lines = djp.job(74, f"probe move=5h5d margin=300 nodes=300000 position {pos}")
     res = kv(of_job(lines, 74, "result")[0])
     assert res.get("verdict") == "no", f"飛車を捨てる手が margin=300 で no にならない: {res}"
-    lines = djp.job(75, f"probe move=5h5d threshold=0 nodes=30 mindepth=4 position {pos}")
+    # mindepth：深さの上限（depth=2）が mindepth（4）より浅いので、結論は必ず unknown。
+    # （節点数で打ち切る形にすると、エンジンの効率しだいで深さ 4 に届いてしまうので、深さの上限で確かめる）
+    lines = djp.job(75, f"probe move=5h5d threshold=0 depth=2 mindepth=4 position {pos}")
     res = kv(of_job(lines, 75, "result")[0])
     assert res.get("verdict") == "unknown", f"mindepth に届かないのに結論を出した: {res}"
+    assert int(res.get("depth", "0")) < 4, f"depth=2 の上限を超えて読んだ: {res}"
+    # 同じ深さの上限でも、mindepth がそれ以下なら結論を出す
+    lines = djp.job(76, f"probe move=5h5d threshold=0 depth=4 mindepth=2 position {pos}")
+    res = kv(of_job(lines, 76, "result")[0])
+    assert res.get("verdict") == "no", f"mindepth=2・depth=4 で飛車を捨てる手が no にならない: {res}"
 
 
 def test_threat_tsumero(djp):
