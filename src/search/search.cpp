@@ -567,7 +567,7 @@ int Worker::qsearch(int alpha, int beta, int ply, int qd) {
     const int qalpha0 = alpha;
     {
         TTEntry te;
-        if (!sh_.no_tt_read && sh_.tt->probe(qkey, te)) {
+        if (sh_.tt->probe(qkey, te)) {
             const int s = from_tt(te.score, ply);
             if (te.bound == kExact || (te.bound == kLower && s >= beta) || (te.bound == kUpper && s <= alpha)) return s;
         }
@@ -661,7 +661,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null) {
     TTEntry tte;
     bool has_tt = false;
     Move tt_move{};
-    if (!sh_.no_tt_read && sh_.tt->probe(key, tte)) {
+    if (sh_.tt->probe(key, tte)) {
         has_tt = tte.has_move;
         tt_move = tte.move;
         if (!pv_node && tte.depth >= depth) {
@@ -1051,7 +1051,6 @@ Job::Job(const Game& root, const Limits& lim, const Options& opt, const EvalRef&
     sh_.sink = std::move(sink);
     sh_.node_limit = lim.nodes;
     sh_.exact_all = lim.exact_all;
-    sh_.no_tt_read = lim.mode == JobMode::kProbe;
     sh_.max_depth = lim.depth > 0 ? std::min(lim.depth, kMaxDepth) : kMaxDepth;
 }
 

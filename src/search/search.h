@@ -236,7 +236,6 @@ public:
         InfoSink sink;
         RootReport root_report;
         bool exact_all = false;                 // rank：この段で正確な値を得た手の値を、上限の値で上書きしない
-        bool no_tt_read = false;                // probe：置換表の結論を読まない（他のジョブの深い結論に頼らず、自分の節点数で読む）
     };
 private:
     long long budget_ms() const;   // 今の制限から思考時間（ms）を求める。制限なしは -1（§E2.4 の NetworkDelay を差し引く）
