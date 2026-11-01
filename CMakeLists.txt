@@ -19,7 +19,7 @@ add_executable(nuenagon
   src/dajo/dajo.cpp
   src/platform/cpu_affinity.cpp
   src/platform/file_util.cpp
-  src/eval/halfkp/halfkp.cpp
+  src/eval/nnue/nnue.cpp
 )
 find_package(Threads REQUIRED)
 target_link_libraries(nuenagon PRIVATE Threads::Threads)

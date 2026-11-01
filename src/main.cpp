@@ -14,7 +14,7 @@
 #include <vector>
 #include "board/game.h"
 #include "eval/raypair/network.h"
-#include "eval/halfkp/halfkp.h"
+#include "eval/nnue/nnue.h"
 #include "eval/raypair/raypair.h"
 #include "mate/dfpn.h"
 #include "platform/cpu_affinity.h"
@@ -87,9 +87,9 @@ struct EvalState {
     int scale_option = 0;                    // EvalScale（0 ならファイルの値）
     int fv_scale = 16;                       // FV_SCALE（HalfKP の評価値 = raw / FV_SCALE）
     bool debug_check = false;                // DebugCheckAccumulator
-    raypair::Network net;                    // 読み込んだ RayPair の重み（loaded かつ !is_halfkp のとき）
-    halfkp::Network hk;                      // 読み込んだ HalfKP の重み（loaded かつ is_halfkp のとき）
-    bool is_halfkp = false;                  // 読み込んだのが HalfKP（nn.bin）か
+    raypair::Network net;                    // 読み込んだ RayPair の重み（loaded かつ !is_nnue のとき）
+    nnue::Network hk;                      // 読み込んだ HalfKP の重み（loaded かつ is_nnue のとき）
+    bool is_nnue = false;                  // 読み込んだのが HalfKP（nn.bin）か
     bool loaded = false;
     double scale = 0;                        // 評価に使う eval_scale（RayPair）
 };
@@ -97,9 +97,9 @@ struct EvalState {
 // 評価に使う重みの参照（探索と bench で使う）
 search::EvalRef make_ref(const EvalState& ev) {
     search::EvalRef r;
-    r.net = ev.is_halfkp ? nullptr : &ev.net;
+    r.net = ev.is_nnue ? nullptr : &ev.net;
     r.scale = ev.scale;
-    r.hk = ev.is_halfkp ? &ev.hk : nullptr;
+    r.hk = ev.is_nnue ? &ev.hk : nullptr;
     r.fv_scale = ev.fv_scale;
     return r;
 }
@@ -107,7 +107,7 @@ search::EvalRef make_ref(const EvalState& ev) {
 // Game に評価関数を設定する（読み込んだ種類に合わせる）
 void attach_eval(Game& g, const EvalState& ev) {
     if (!ev.loaded) g.set_network(nullptr);
-    else if (ev.is_halfkp) g.set_halfkp(&ev.hk);
+    else if (ev.is_nnue) g.set_nnue(&ev.hk);
     else g.set_network(&ev.net);
 }
 
@@ -218,11 +218,11 @@ void cmd_setoption(EvalState& ev, search::Options& opt, std::istringstream& in) 
 }
 
 // ファイルの先頭4バイトが HalfKP（やねうら王の NNUE）の版なら true。開けなければ false（RayPair の読み込みで理由を出す）
-bool file_is_halfkp(const std::string& path) {
+bool file_is_nnue(const std::string& path) {
     unsigned char b[4] = {0, 0, 0, 0};
     if (!platform::read_head(path, b, 4)) return false;
     const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-    return v == halfkp::kMagic;
+    return v == nnue::kMagic;
 }
 
 // isready：重みを読み込む（§E2.5）。既定のファイルも無いときは評価なしで準備完了にする。
@@ -235,22 +235,22 @@ bool cmd_isready(Game& game, EvalState& ev) {
         reply("info string eval: no weight file (" + ev.file + ")");
         return true;
     }
-    if (file_is_halfkp(ev.file)) {
+    if (file_is_nnue(ev.file)) {
         // やねうら王の NNUE（HalfKP）。同じエンジンの中で、RayPair と切り替えて使える（§E10）
-        halfkp::Network hk;
+        nnue::Network hk;
         std::string herr;
-        if (!halfkp::load_network(ev.file, hk, herr)) {
+        if (!nnue::load_network(ev.file, hk, herr)) {
             ev.loaded = false;
             game.set_network(nullptr);
             reply("info string eval load error: " + herr);
             return false;
         }
         ev.hk = std::move(hk);
-        ev.is_halfkp = true;
+        ev.is_nnue = true;
         ev.loaded = true;
-        game.set_halfkp(&ev.hk);
-        reply("info string Nuenagon eval: feature=HalfKP network=halfkp_256x2-32-32 W=" + std::to_string(halfkp::kW) +
-              " L1=" + std::to_string(halfkp::kL1) + " L2=" + std::to_string(halfkp::kL2) +
+        game.set_nnue(&ev.hk);
+        reply("info string Nuenagon eval: feature=" + ev.hk.feature_name + " network=" + ev.hk.network_name +
+              " W=" + std::to_string(ev.hk.W) + " L1=" + std::to_string(ev.hk.L1) + " L2=" + std::to_string(ev.hk.L2) +
               " fv_scale=" + std::to_string(ev.fv_scale));
         return true;
     }
@@ -263,7 +263,7 @@ bool cmd_isready(Game& game, EvalState& ev) {
         return false;
     }
     ev.net = std::move(net);
-    ev.is_halfkp = false;
+    ev.is_nnue = false;
     ev.loaded = true;
     ev.scale = ev.scale_option > 0 ? (double)(float)ev.scale_option : (double)ev.net.eval_scale;
     game.set_network(&ev.net);
@@ -293,7 +293,7 @@ void cmd_eval(const Game& game, const EvalState& ev) {
     }
     const int32_t raw = game.raw_eval();
     // HalfKP は raw / FV_SCALE を 0 の方へ切り捨てる（クリップしない）。RayPair は eval_scale で換算する
-    const long long cp = ev.is_halfkp ? (long long)(raw / ev.fv_scale) : raypair::cp_of(raw, ev.scale);
+    const long long cp = ev.is_nnue ? (long long)(raw / ev.fv_scale) : raypair::cp_of(raw, ev.scale);
     reply("eval raw " + std::to_string(raw) + " cp " + std::to_string(cp));
 }
 
@@ -308,12 +308,12 @@ void cmd_acc(const Game& game, const EvalState& ev, std::istringstream& in, bool
         reply("info string eval not loaded");
         return;
     }
-    if (ev.is_halfkp) {
-        halfkp::Accumulator h;
-        if (full) halfkp::full_accumulator(ev.hk, game.board, h);
-        else h = game.halfkp_accumulator();
+    if (ev.is_nnue) {
+        std::vector<int16_t> h(ev.hk.acc_len());
+        if (full) nnue::full_accumulator(ev.hk, game.board, h.data());
+        else for (size_t i = 0; i < h.size(); i++) h[i] = game.nnue_acc()[i];
         std::string hout = full ? "accfull" : "acc";
-        for (int j = 0; j < halfkp::kW; j++) hout += " " + std::to_string(h.v[p][j]);
+        for (int j = 0; j < ev.hk.W; j++) hout += " " + std::to_string(h[(size_t)p * ev.hk.W + j]);
         reply(hout);
         return;
     }
