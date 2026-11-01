@@ -109,7 +109,7 @@ std::string summary(const search::RootMove& r, double scale) {
 
 // 評価関数の重みを、局面に付ける（局面を作る前に呼ぶ）
 void attach(Game& g, const search::EvalRef& ev) {
-    if (ev.hk) g.set_halfkp(ev.hk);
+    if (ev.hk) g.set_nnue(ev.hk);
     else if (ev.net) g.set_network(ev.net);
 }
 

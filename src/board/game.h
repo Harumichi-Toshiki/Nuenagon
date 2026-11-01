@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include "eval/halfkp/halfkp.h"
+#include "eval/nnue/nnue.h"
 #include "eval/raypair/network.h"
 #include "shogi_utils.h"
 
@@ -30,9 +30,9 @@ public:
     Game();
 
     void set_network(const raypair::Network* net);  // 評価に使う重み（RayPair。nullptr なら評価なし）。蓄積値を作り直す
-    void set_halfkp(const halfkp::Network* net);    // 評価に使う重み（HalfKP）。蓄積値を作り直す
+    void set_nnue(const nnue::Network* net);    // 評価に使う重み（nn.bin：HalfKP・HalfKA。§E10）。蓄積値を作り直す
     bool has_network() const { return net_ != nullptr || hk_ != nullptr; }
-    bool is_halfkp() const { return hk_ != nullptr; }
+    bool is_nnue() const { return hk_ != nullptr; }
     // 手番側から見た出力層の生の値（RayPair と HalfKP で式が違う。cp への換算は呼び出し側）
     int32_t raw_eval() const;
 
@@ -54,7 +54,8 @@ public:
 
     // 現在の第1層の蓄積値（重みを設定しているときだけ使える）
     const raypair::Accumulator& accumulator() const { return acc_.back(); }
-    const halfkp::Accumulator& halfkp_accumulator() const { return hacc_.back(); }
+    // NNUE の現在の蓄積値（視点 p は p × W から W 個。hk_ があるときだけ使える）
+    const int16_t* nnue_acc() const { return hstack_.data() + hstack_.size() - (size_t)hk_->acc_len(); }
     // 差分で保っている蓄積値が、全計算と一致するか（§E3.4）
     bool accumulator_matches_full() const;
 
@@ -78,8 +79,8 @@ private:
     Board start_;                        // 履歴の先頭の局面（重みを設定し直すときに使う）
     const raypair::Network* net_ = nullptr;
     std::vector<raypair::Accumulator> acc_;  // RayPair のとき acc_.size() == plies_.size() + 1。戻す用のスタック
-    const halfkp::Network* hk_ = nullptr;     // HalfKP の重み（hk_ があるときは net_ は null）
-    std::vector<halfkp::Accumulator> hacc_;   // HalfKP のとき hacc_.size() == plies_.size() + 1
+    const nnue::Network* hk_ = nullptr;     // NNUE（nn.bin）の重み（hk_ があるときは net_ は null）
+    std::vector<int16_t> hstack_;             // NNUE のとき、手ごとの蓄積値（acc_len() 個ずつ）。戻す用のスタック
     // 両視点の盤面（差分更新の元）。指す・戻すたびに、変わったマスと持ち駒だけを写す（§E3.2）
     raypair::ViewBoard view_[2];
 };

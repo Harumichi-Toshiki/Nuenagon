@@ -49,7 +49,7 @@ void Game::set_network(const raypair::Network* net) {
     replay_from_start(old);
 }
 
-void Game::set_halfkp(const halfkp::Network* net) {
+void Game::set_nnue(const nnue::Network* net) {
     std::vector<Ply> old = plies_;
     hk_ = net;
     net_ = nullptr;
@@ -70,18 +70,17 @@ void Game::replay_from_start(const std::vector<Ply>& plies) {
 
 void Game::init_accumulators() {
     acc_.clear();
-    hacc_.clear();
+    hstack_.clear();
     if (net_) acc_.push_back(full_of(*net_, board));
     if (hk_) {
-        halfkp::Accumulator a;
-        halfkp::full_accumulator(*hk_, board, a);
-        hacc_.push_back(a);
+        hstack_.resize(hk_->acc_len());
+        nnue::full_accumulator(*hk_, board, hstack_.data());
     }
     refresh_views();
 }
 
 int32_t Game::raw_eval() const {
-    if (hk_) return halfkp::forward_raw(*hk_, hacc_.back(), board.turn);
+    if (hk_) return nnue::forward_raw(*hk_, nnue_acc(), board.turn);
     if (!net_) return 0;
     return raypair::forward_raw(*net_, acc_.back(), board.turn);
 }
@@ -105,15 +104,16 @@ void Game::refresh_views() {
 }
 
 void Game::push(const Move& m) {
-    // HalfKP の差分更新は、指す前の盤から取る情報が要る
-    const halfkp::MoveInfo mi = hk_ ? halfkp::make_move_info(board, m) : halfkp::MoveInfo{};
+    // NNUE の差分更新は、指す前の盤から取る情報が要る
+    const nnue::MoveInfo mi = hk_ ? nnue::make_move_info(board, m) : nnue::MoveInfo{};
     plies_.push_back(Ply{ m, StateInfo{}, false });
     board.push_move(m, plies_.back().state);
     history_.push_back(make_entry(board, false));
     if (hk_) {
-        halfkp::Accumulator next = hacc_.back();
-        halfkp::update_accumulator(*hk_, board, mi, hacc_.back(), next);
-        hacc_.push_back(next);
+        const size_t L = hk_->acc_len();
+        const size_t prev = hstack_.size() - L;
+        hstack_.resize(hstack_.size() + L);
+        nnue::update_accumulator(*hk_, board, mi, hstack_.data() + prev, hstack_.data() + prev + L);
     }
     if (net_) {
         // 変わったマスは移動元（駒打ちなら無し）と移動先。両視点の盤面を写し、その差分で蓄積値を更新する
@@ -143,7 +143,12 @@ void Game::push_null() {
         raypair::Accumulator next = acc_.back();
         acc_.push_back(next);
     }
-    if (hk_) hacc_.push_back(hacc_.back());
+    if (hk_) {
+        const size_t L = hk_->acc_len();
+        const size_t prev = hstack_.size() - L;
+        hstack_.resize(hstack_.size() + L);
+        std::memcpy(hstack_.data() + prev + L, hstack_.data() + prev, sizeof(int16_t) * L);
+    }
 }
 
 void Game::pop() {
@@ -166,7 +171,7 @@ void Game::pop() {
     plies_.pop_back();
     history_.pop_back();
     if (net_) acc_.pop_back();
-    if (hk_) hacc_.pop_back();
+    if (hk_) hstack_.resize(hstack_.size() - hk_->acc_len());
 }
 
 bool Game::push_usi(const std::string& usi) {
@@ -202,9 +207,9 @@ std::vector<Move> Game::legal_moves() const {
 
 bool Game::accumulator_matches_full() const {
     if (hk_) {
-        halfkp::Accumulator full;
-        halfkp::full_accumulator(*hk_, board, full);
-        return std::memcmp(&full, &hacc_.back(), sizeof full) == 0;
+        std::vector<int16_t> full(hk_->acc_len());
+        nnue::full_accumulator(*hk_, board, full.data());
+        return std::memcmp(full.data(), nnue_acc(), sizeof(int16_t) * full.size()) == 0;
     }
     if (!net_) return false;
     raypair::Accumulator full = full_of(*net_, board);

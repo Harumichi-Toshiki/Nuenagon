@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 #include "board/game.h"
-#include "eval/halfkp/halfkp.h"
+#include "eval/nnue/nnue.h"
 #include "eval/raypair/network.h"
 
 namespace search {
@@ -100,7 +100,7 @@ struct Options {
 struct EvalRef {
     const raypair::Network* net = nullptr;  // RayPair
     double scale = 0;                       // RayPair の eval_scale
-    const halfkp::Network* hk = nullptr;    // HalfKP（§E10）
+    const nnue::Network* hk = nullptr;    // HalfKP（§E10）
     int fv_scale = 16;                      // HalfKP の FV_SCALE（評価値 = raw / fv_scale）
 };
 
