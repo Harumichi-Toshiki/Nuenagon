@@ -82,6 +82,7 @@ struct View {
     bool king;    // 玉を特徴に入れるか
     bool merge;   // 相手の玉を自分の玉と同じ番号にするか
     bool mirror;  // 左右を反転するか
+    int key;      // 玉のマス（反転前）。Finny テーブルの添字
 };
 
 View make_view(const Network& net, const Board& b, int p) {
@@ -92,6 +93,7 @@ View make_view(const Network& net, const Board& b, int p) {
     v.king = f.king;
     v.merge = f.merge;
     int ksq = (p == 0) ? halfkp_sq(b.king_sq[0]) : 80 - halfkp_sq(b.king_sq[1]);
+    v.key = ksq;
     v.mirror = f.hm && ksq / 9 >= 5;
     if (v.mirror) ksq = mir(ksq);
     v.base = ksq * v.plane;
@@ -182,6 +184,60 @@ void full_one(const Network& net, const Board& b, int p, int16_t* out) {
         const int16_t* row = &net.ft_weight[(size_t)idx[i] * W];
         for (int j = 0; j < W; j++) out[j] = (int16_t)(out[j] + row[j]);  // mod 2^16
     }
+}
+
+// 行の足し引きを、何本でも（8 本ずつに分けて）行う
+void apply_rows_any(int16_t* out, const Network& net, const int* minus, int nm, const int* plus, int np) {
+    for (int i = 0; i < nm; i += 8) apply_rows(out, net, minus + i, nm - i < 8 ? nm - i : 8, nullptr, 0);
+    for (int i = 0; i < np; i += 8) apply_rows(out, net, nullptr, 0, plus + i, np - i < 8 ? np - i : 8);
+}
+
+// Finny テーブルで視点 p の蓄積値を作る。覚えた盤があれば、その盤との差分だけを足し引きする
+void refresh_view(const Network& net, const Board& b, int p, int16_t* out, Finny& fc) {
+    const View v = make_view(net, b, p);
+    Finny::Slot& s = fc.slots[p][v.key];
+    if (!s.valid) {
+        full_one(net, b, p, out);
+    }
+    else {
+        int minus[256], plus[256];
+        int nm = 0, np = 0;
+        for (int sq = 0; sq < 81; sq++) {
+            const int old = s.piece[sq], now = b.pieces[sq];
+            if (old == now) continue;
+            if (old) {
+                const int i = board_index(v, old, halfkp_sq(sq));
+                if (i >= 0) minus[nm++] = i;
+            }
+            if (now) {
+                const int i = board_index(v, now, halfkp_sq(sq));
+                if (i >= 0) plus[np++] = i;
+            }
+        }
+        int cnt_old = 0, cnt_now = 0;
+        for (int sq = 0; sq < 81; sq++) {
+            if (s.piece[sq] && (v.king || (s.piece[sq] & 15) != KING)) cnt_old++;
+            if (b.pieces[sq] && (v.king || (b.pieces[sq] & 15) != KING)) cnt_now++;
+        }
+        for (int c = 0; c < 2; c++) {
+            for (int t = 1; t <= 7; t++) {
+                const int old = s.hand[c][t], now = b.hand[c][t];
+                cnt_old += old;
+                cnt_now += now;
+                for (int i = old; i < now; i++) plus[np++] = hand_index(v, c, t, i);
+                for (int i = now; i < old; i++) minus[nm++] = hand_index(v, c, t, i);
+            }
+        }
+        // 箱の駒の数（全体の数から盤と持ち駒の数を引いたもの）の差
+        for (int d = cnt_old - cnt_now; d > 0; d--) plus[np++] = v.base;
+        for (int d = cnt_now - cnt_old; d > 0; d--) minus[nm++] = v.base;
+        std::memcpy(out, s.acc.data(), sizeof(int16_t) * net.W);
+        apply_rows_any(out, net, minus, nm, plus, np);
+    }
+    s.valid = true;
+    for (int sq = 0; sq < 81; sq++) s.piece[sq] = b.pieces[sq];
+    for (int c = 0; c < 2; c++) for (int t = 0; t < 8; t++) s.hand[c][t] = (uint8_t)(t >= 1 ? b.hand[c][t] : 0);
+    s.acc.assign(out, out + net.W);
 }
 
 // x（uint8）と w（int8）の内積。n は 32 の倍数。積の和は int32（両版で同じ値）
@@ -338,13 +394,14 @@ void full_accumulator(const Network& net, const Board& board, int16_t* acc) {
 }
 
 void update_accumulator(const Network& net, const Board& after, const MoveInfo& mi,
-                        const int16_t* prev, int16_t* next) {
+                        const int16_t* prev, int16_t* next, Finny* fc) {
     const int W = net.W;
     for (int p = 0; p < 2; p++) {
         int16_t* out = next + (size_t)p * W;
         // 自分の玉が動いた視点は、玉のマスと反転の向きが変わるので全計算
         if (mi.from >= 0 && (mi.piece & 15) == KING && mi.mover == p) {
-            full_one(net, after, p, out);
+            if (fc) refresh_view(net, after, p, out, *fc);
+            else full_one(net, after, p, out);
             continue;
         }
         std::memcpy(out, prev + (size_t)p * W, sizeof(int16_t) * W);

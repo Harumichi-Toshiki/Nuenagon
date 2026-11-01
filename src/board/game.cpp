@@ -72,6 +72,7 @@ void Game::init_accumulators() {
     acc_.clear();
     hstack_.clear();
     if (net_) acc_.push_back(full_of(*net_, board));
+    finny_.reset();
     if (hk_) {
         hstack_.resize(hk_->acc_len());
         nnue::full_accumulator(*hk_, board, hstack_.data());
@@ -113,7 +114,7 @@ void Game::push(const Move& m) {
         const size_t L = hk_->acc_len();
         const size_t prev = hstack_.size() - L;
         hstack_.resize(hstack_.size() + L);
-        nnue::update_accumulator(*hk_, board, mi, hstack_.data() + prev, hstack_.data() + prev + L);
+        nnue::update_accumulator(*hk_, board, mi, hstack_.data() + prev, hstack_.data() + prev + L, &finny_);
     }
     if (net_) {
         // 変わったマスは移動元（駒打ちなら無し）と移動先。両視点の盤面を写し、その差分で蓄積値を更新する

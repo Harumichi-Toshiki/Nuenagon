@@ -40,6 +40,21 @@ struct Network {
     int acc_len() const { return 2 * W; }
 };
 
+// Finny テーブル：視点 p と、玉の元のマス key ごとに、最後に作った蓄積値と、そのときの盤・持ち駒を覚える。
+// 玉を動かした視点の作り直しで、覚えた盤との差分だけを足し引きする。盤の状態だけで決まるので、履歴によらず結果は同じ。
+struct Finny {
+    struct Slot {
+        bool valid = false;
+        uint8_t piece[81] = {};
+        uint8_t hand[2][8] = {};
+        std::vector<int16_t> acc;  // 視点 p の蓄積値（W 個）
+    };
+    Slot slots[2][81];
+    void reset() {
+        for (auto& row : slots) for (auto& s : row) s.valid = false;
+    }
+};
+
 // ファイルを読み、構造を決め、検査する。失敗なら false と理由を err に入れる
 bool load_network(const std::string& path, Network& net, std::string& err);
 
@@ -59,8 +74,9 @@ void full_accumulator(const Network& net, const Board& board, int16_t* acc);
 
 // 1手ぶんの差分更新。after は指した後の盤、prev は指す前の蓄積値、next は書き込み先（acc_len() 個）。
 // 自分の玉が動いた視点は全計算で作り直す。相手の視点は、玉が特徴に入るときは玉の移動も差分で扱う
+// fc が null でなければ、玉を動かした視点は Finny テーブルで作る（結果は同じ）
 void update_accumulator(const Network& net, const Board& after, const MoveInfo& mi,
-                        const int16_t* prev, int16_t* next);
+                        const int16_t* prev, int16_t* next, Finny* fc = nullptr);
 
 // 出力層の raw（手番 stm から見た、出力層の int32）
 int32_t forward_raw(const Network& net, const int16_t* acc, int stm);

@@ -81,6 +81,7 @@ private:
     std::vector<raypair::Accumulator> acc_;  // RayPair のとき acc_.size() == plies_.size() + 1。戻す用のスタック
     const nnue::Network* hk_ = nullptr;     // NNUE（nn.bin）の重み（hk_ があるときは net_ は null）
     std::vector<int16_t> hstack_;             // NNUE のとき、手ごとの蓄積値（acc_len() 個ずつ）。戻す用のスタック
+    nnue::Finny finny_;                       // NNUE の玉の位置ごとの蓄積値（玉を動かした視点の作り直しに使う）
     // 両視点の盤面（差分更新の元）。指す・戻すたびに、変わったマスと持ち駒だけを写す（§E3.2）
     raypair::ViewBoard view_[2];
 };
