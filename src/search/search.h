@@ -99,7 +99,7 @@ struct Options {
     bool search_singular = false;       // SearchSingular：置換表の手が他より明らかに良いとき 1 手延長（multi-cut・負の延長を含む）
     bool search_probcut = false;        // SearchProbCut：取る手の浅い探索で β を大きく超えたら、深く読まずに返す
     bool search_lmr_history = false;    // SearchLMRHistory：LMR をカットノードで増やし、履歴の効きを細かくする
-    bool search_cont_learn = true;     // SearchContLearn：連続履歴を学習する（N7 は ContHistory を読むだけで書いていなかった）
+    bool search_cont_learn = false;     // SearchContLearn：連続履歴を学習する（N7 は ContHistory を読むだけで書いていなかった）
     bool search_cont_deep = false;      // SearchContDeep：連続履歴に 4 手前（1・2・4 手前）を使う
     bool search_cap_hist = false;       // SearchCapHist：取る手の履歴（攻め駒・取られる駒の種類ごと）で並べ替える
     bool search_corr = true;            // SearchCorrHist：玉の位置ごとに、探索の結果と静的評価のずれを覚えて補正する
