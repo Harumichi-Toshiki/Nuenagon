@@ -101,7 +101,7 @@ struct Options {
     bool search_cont_learn = false;     // SearchContLearn：連続履歴を学習する（N7 は ContHistory を読むだけで書いていなかった）
     bool search_cont_deep = false;      // SearchContDeep：連続履歴に 4 手前（1・2・4 手前）を使う
     bool search_cap_hist = false;       // SearchCapHist：取る手の履歴（攻め駒・取られる駒の種類ごと）で並べ替える
-    bool search_corr = false;           // SearchCorrHist：玉の位置ごとに、探索の結果と静的評価のずれを覚えて補正する
+    bool search_corr = true;            // SearchCorrHist：玉の位置ごとに、探索の結果と静的評価のずれを覚えて補正する
     bool search_check_ext = false;      // SearchCheckExt：王手になる手を 1 手延長する
     bool search_king_danger = false;    // SearchKingDanger：相手の玉の逃げ道が1つ以下の節点では、LMR と静かな手の枝刈りを使わない
     bool search_singular_double = false; // SearchSingularDouble：他の手が十分に劣るとき、singular の延長を 2 手にする
