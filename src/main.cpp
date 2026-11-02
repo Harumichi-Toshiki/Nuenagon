@@ -93,6 +93,7 @@ const SearchFlag kSearchFlags[] = {
     {"SearchSingularDouble", &search::Options::search_singular_double},
     {"SearchDropLate", &search::Options::search_drop_late},
     {"SearchQCheck", &search::Options::search_qcheck},
+    {"SearchLMRStrong", &search::Options::search_lmr_strong},
 };
 
 // 評価関数の設定（USI オプション §E2.3）と、読み込んだ重み
@@ -726,6 +727,9 @@ int main() {
         }
         else if (cmd == "sfen") {
             reply("sfen " + game.board.to_sfen_key());
+        }
+        else if (cmd == "searchstats") {
+            reply(search::last_stats_line());  // 直前の探索の統計（N8.1）
         }
         else if (cmd == "moves") {
             std::string out = "moves";

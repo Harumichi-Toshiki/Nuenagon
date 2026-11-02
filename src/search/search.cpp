@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <iostream>
 #include <utility>
 
@@ -289,6 +291,7 @@ public:
     int qsearch(int alpha, int beta, int ply, int qd);
     int search_root(int depth, int alpha, int beta, int pv_idx, std::vector<RootMove>& rm);
 
+    void count(int i) { sh_.cnt.c[i].fetch_add(1, std::memory_order_relaxed); }
     bool aborted();                 // 止める条件（停止・時間・ノード数・差分更新の検査）を見る
     long long total_nodes() const { return sh_.nodes.load(std::memory_order_relaxed) + pending_; }
     int evaluate() const;
@@ -606,6 +609,7 @@ bool Worker::find_mate1(const Move* moves, int n, Move& out) const {
 // qd は静止探索に入ってからの手数。王手の応酬が続くと分岐が膨らむので、上限を超えたら評価して止める。
 int Worker::qsearch(int alpha, int beta, int ply, int qd) {
     if (aborted()) return 0;
+    count(SearchCounters::kQNodes);
     if (ply > seldepth_) seldepth_ = ply;
     if (ply >= kMaxPly - 1) return evaluate();
 
@@ -723,12 +727,15 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     TTEntry tte;
     bool has_tt = false;
     Move tt_move{};
+    count(SearchCounters::kTTProbe);
     if (sh_.tt->probe(key, tte)) {
+        count(SearchCounters::kTTHit);
         has_tt = tte.has_move;
         tt_move = tte.move;
         if (!excl && !pv_node && tte.depth >= depth) {
             const int s = from_tt(tte.score, ply);
             if (tte.bound == kExact || (tte.bound == kLower && s >= beta) || (tte.bound == kUpper && s <= alpha)) {
+                count(SearchCounters::kTTCut);
                 return s;
             }
         }
@@ -766,12 +773,14 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     // null move pruning（§E5.1）。削減量は N4.1 の 2 + depth/4、または深さと評価値の差で決める（§E11）
     if (prune_ok && allow_null && depth >= 3 && static_eval >= beta && has_non_pawn_material()) {
         const int r = o.search_null_dynamic ? 3 + depth / 3 + std::min(3, (static_eval - beta) / 200) : 2 + depth / 4;
+        count(SearchCounters::kNMP);
         game_.push_null();
         cur_key_[ply + 1] = -1;
         const int s = -negamax(depth - 1 - r, -beta, -beta + 1, ply + 1, false, !cut);
         game_.pop();
         if (sh_.stop.load(std::memory_order_relaxed)) return 0;
         if (s >= beta) {
+            count(SearchCounters::kNMPCut);
             if (!(o.search_null_dynamic && depth >= 12)) return s >= kMateBound ? beta : s;
             // 深いところでは、手を渡さずに確かめる（検証探索）。確かめられなければ普通に読む
             const int v = negamax(depth - r, beta - 1, beta, ply, false, cut);
@@ -909,6 +918,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
                 if (o.search_lmr_table) {
                     red = lmr_table(depth, legal);
                     if (!o.search_improving || !improving) red++;
+                    if (o.search_lmr_strong && hs < 0) red++;
                     if (pv_node) red--;
                     if (o.search_lmr_history) {
                         // N8：カットノード（βカットが期待される節点）は多く減らし、履歴は細かく見る
@@ -929,8 +939,12 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
                 }
                 red = std::clamp(red, 0, std::max(0, nd - 1));
             }
+            if (red > 0) count(SearchCounters::kLMR);
             s = -negamax(nd - red, -alpha - 1, -alpha, ply + 1, true, red > 0 || !cut);
-            if (red > 0 && s > alpha) s = -negamax(nd, -alpha - 1, -alpha, ply + 1, true, !cut);
+            if (red > 0 && s > alpha) {
+                count(SearchCounters::kLMRResearch);
+                s = -negamax(nd, -alpha - 1, -alpha, ply + 1, true, !cut);
+            }
             if (pv_node && s > alpha && s < beta) s = -negamax(nd, -beta, -alpha, ply + 1, true, false);
         }
         game_.pop();
@@ -943,6 +957,10 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
                 alpha = s;
                 if (pv_node) set_pv(ply, m);
                 if (alpha >= beta) {
+                    if (!pv_node) {
+                        count(SearchCounters::kCutNodes);
+                        if (legal == 1) count(SearchCounters::kFirstCut);
+                    }
                     if (!capture) record_quiet_cutoff(m, depth, ply, quiets, nq);
                     else cap_cutoff(cidx, depth, cap_tried, ncap);
                     break;
@@ -1072,7 +1090,10 @@ void Worker::iterate(std::vector<RootMove>& rm, int max_depth, const F* on_depth
         if (aborted_now) break;
         sh_.nodes.fetch_add(pending_, std::memory_order_relaxed);  // 報告の前に、ノード数を共有へ足す
         pending_ = 0;
-        if (on_depth) (*on_depth)(depth, rm, seldepth_);
+        if (on_depth) {
+            if (depth <= kMaxDepth) sh_.cnt.depth_nodes[depth].store(total_nodes(), std::memory_order_relaxed);
+            (*on_depth)(depth, rm, seldepth_);
+        }
     }
     sh_.nodes.fetch_add(pending_, std::memory_order_relaxed);
     pending_ = 0;
@@ -1281,6 +1302,51 @@ void Job::run_mate(const Game& game) {
     if (mate_found_) best_move_ = mate_pv_[0];
 }
 
+namespace {
+std::mutex g_stats_mu;
+std::string g_stats_line = "searchstats none";
+
+// 探索の終了時に、統計を 1 行にして保存する（searchstats で返す）
+void publish_stats(const Job::Shared& sh) {
+    auto c = [&sh](int i) { return sh.cnt.c[i].load(std::memory_order_relaxed); };
+    const long long n = sh.nodes.load(std::memory_order_relaxed);
+    const long long cut = c(SearchCounters::kCutNodes), first = c(SearchCounters::kFirstCut);
+    const long long probe = c(SearchCounters::kTTProbe), hit = c(SearchCounters::kTTHit), tcut = c(SearchCounters::kTTCut);
+    const long long lmr = c(SearchCounters::kLMR), lre = c(SearchCounters::kLMRResearch);
+    const long long nmp = c(SearchCounters::kNMP), ncut = c(SearchCounters::kNMPCut);
+    // 実効分岐数：最後の 3 反復の、直前の反復に対するノード数の比の平均
+    int last = 0;
+    for (int d = 1; d <= kMaxDepth; d++) {
+        if (sh.cnt.depth_nodes[d].load(std::memory_order_relaxed) > 0) last = d;
+    }
+    double ebf_sum = 0;
+    int ebf_n = 0;
+    for (int d = std::max(2, last - 2); d <= last; d++) {
+        const double a = (double)sh.cnt.depth_nodes[d].load(std::memory_order_relaxed);
+        const double b = (double)sh.cnt.depth_nodes[d - 1].load(std::memory_order_relaxed);
+        if (a > 0 && b > 0) {
+            ebf_sum += a / b;
+            ebf_n++;
+        }
+    }
+    auto ratio = [](long long a, long long b) { return b > 0 ? (double)a / (double)b : 0.0; };
+    char buf[512];
+    std::snprintf(buf, sizeof buf,
+                  "searchstats nodes=%lld qnodes=%lld qratio=%.3f fh=%lld fh1=%lld fh1rate=%.3f "
+                  "tt_probe=%lld tt_hit=%.3f tt_cut=%.3f lmr=%lld lmr_re=%.3f nmp=%lld nmp_cut=%.3f ebf=%.3f",
+                  n, c(SearchCounters::kQNodes), ratio(c(SearchCounters::kQNodes), n), cut, first,
+                  ratio(first, cut), probe, ratio(hit, probe), ratio(tcut, probe), lmr, ratio(lre, lmr), nmp,
+                  ratio(ncut, nmp), ebf_n ? ebf_sum / ebf_n : 0.0);
+    std::lock_guard<std::mutex> lk(g_stats_mu);
+    g_stats_line = buf;
+}
+}  // namespace
+
+std::string last_stats_line() {
+    std::lock_guard<std::mutex> lk(g_stats_mu);
+    return g_stats_line;
+}
+
 void Job::run() {
     const long long start = now_ms();
     // 駆動スレッドは、cpus の先頭の論理CPUに固定する（§E2.4。ヘルパーは残りの CPU）
@@ -1397,6 +1463,7 @@ void Job::run() {
     Worker main_worker(sh_, game, 0);
     std::vector<RootMove> main_rm = rm;
     main_worker.iterate(main_rm, max_depth, &report);
+    publish_stats(sh_);
 
     // 止めて、始まった helper が終わるまで待つ
     sh_.stop = true;

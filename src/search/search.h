@@ -84,6 +84,7 @@ struct Options {
     int search_rfp_depth = 3;           // SearchRFPDepth：RFP を使う最大の深さ（7 は長い詰将棋を 13 問に減らす。3 なら 16 問）
     int search_singular_margin = 3;     // SearchSingularMargin：singular の余裕（深さ1あたり、点数。sbeta = TT の値 − 余裕 × 深さ）
     int search_probcut_margin = 200;    // SearchProbCutMargin：ProbCut の余裕（点数。rbeta = β + 余裕）
+    bool search_lmr_strong = false;     // SearchLMRStrong：並べ替えの点数（履歴＋連続履歴）が負の静かな手は、LMR で 1 段多く減らす（N8.1）
     int search_corr_rate = 64;          // SearchCorrRate：補正の更新の速さ（大きいほど遅い。更新量 = 差 × min(深さ,8) / 値）
 
     // 並べ替え・静止探索の入り切り（既定は true。false なら N5H と同じ動き）
@@ -216,6 +217,20 @@ struct ProbeOut {
     std::vector<Move> pv;   // no のとき：この手を指した後の、相手の咎める手順（手は含まない）
 };
 
+// 探索の統計（N8.1。決定的モードの結果は変えない。searchstats で 1 行に出す）
+struct SearchCounters {
+    enum { kQNodes, kCutNodes, kFirstCut, kTTProbe, kTTHit, kTTCut, kLMR, kLMRResearch, kNMP, kNMPCut, kN };
+    std::atomic<long long> c[kN];
+    std::atomic<long long> depth_nodes[kMaxDepth + 2];  // 反復の深さごとの累計ノード数（EBF に使う）
+    SearchCounters() {
+        for (auto& x : c) x = 0;
+        for (auto& x : depth_nodes) x = 0;
+    }
+};
+
+// 直前の探索の統計を 1 行の文字列にしたもの（searchstats の応答）
+std::string last_stats_line();
+
 // 1つのジョブ（§E5.2）。局面・制限・設定を持ち、Run で探索する。USI の go はジョブ番号0として扱う。
 class Job {
 public:
@@ -253,6 +268,7 @@ public:
         InfoSink sink;
         RootReport root_report;
         bool exact_all = false;                 // rank：この段で正確な値を得た手の値を、上限の値で上書きしない
+        SearchCounters cnt;                     // 探索の統計（N8.1）
     };
 private:
     long long budget_ms() const;   // 今の制限から思考時間（ms）を求める。制限なしは -1（§E2.4 の NetworkDelay を差し引く）
