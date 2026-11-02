@@ -168,7 +168,7 @@ void TranspositionTable::store(uint64_t key, int depth, int score, int bound, co
     const int old_gen = (int)((old_d >> 47) & 0xff);
     const bool same = old_valid && (old_k ^ old_d) == key;
     // 同じ局面、古い世代、または深さが同じか深いときに置き換える
-    if (old_valid && !same && old_gen == gen_ && depth < old_depth) return;
+    if (old_valid && old_gen == gen_ && depth < old_depth && (keep_deep_ || !same)) return;
 
     // 同じ局面で手が無い保存のときは、前の手を残す
     uint64_t mv = (has_move ? pack_move(m) : 0);
@@ -699,6 +699,7 @@ int Worker::qsearch(int alpha, int beta, int ply, int qd) {
             }
         }
     }
+    count(SearchCounters::kTTStore);
     sh_.tt->store(qkey, 0, to_tt(best, ply), best >= beta ? kLower : (best > qalpha0 ? kExact : kUpper), Move{}, false);
     return best;
 }
@@ -767,6 +768,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     // reverse futility（RFP）：評価が β を大きく超えているなら、浅い探索を省いてそのまま返す
     if (o.search_rfp && prune_ok && depth <= o.search_rfp_depth && std::abs(beta) < kMateBound && !(o.search_rfp_guard && king_boxed()) &&
         static_eval - o.search_rfp_margin * depth + (improving ? 60 : 0) >= beta) {
+        if (o.search_store_cut && !excl) sh_.tt->store(key, depth, to_tt(static_eval, ply), kLower, Move{}, false);
         return static_eval;
     }
 
@@ -781,6 +783,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
         if (sh_.stop.load(std::memory_order_relaxed)) return 0;
         if (s >= beta) {
             count(SearchCounters::kNMPCut);
+            if (o.search_store_cut && !excl) sh_.tt->store(key, depth, to_tt(s, ply), kLower, Move{}, false);
             if (!(o.search_null_dynamic && depth >= 12)) return s >= kMateBound ? beta : s;
             // 深いところでは、手を渡さずに確かめる（検証探索）。確かめられなければ普通に読む
             const int v = negamax(depth - r, beta - 1, beta, ply, false, cut);
@@ -840,7 +843,10 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
             if (v >= rbeta) v = -negamax(depth - 4, -rbeta, -rbeta + 1, ply + 1, true, !cut);
             game_.pop();
             if (sh_.stop.load(std::memory_order_relaxed)) return 0;
-            if (v >= rbeta) return v;
+            if (v >= rbeta) {
+                if (o.search_store_cut && !excl) sh_.tt->store(key, depth - 3, to_tt(v, ply), kLower, Move{}, false);
+                return v;
+            }
         }
     }
 
@@ -974,7 +980,10 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     if (legal == 0) return excl ? alpha : -(kMate - ply);  // 合法手が無い（王手されていれば詰み。N4 の決まり）
 
     const int bound = best >= beta ? kLower : (best > alpha0 ? kExact : kUpper);
-    if (!excl) sh_.tt->store(key, depth, to_tt(best, ply), bound, best_move, true);
+    if (!excl) {
+        count(SearchCounters::kTTStore);
+        sh_.tt->store(key, depth, to_tt(best, ply), bound, best_move, true);
+    }
 
     // 静的評価の補正（SearchCorrHist）：探索の結果と、補正の前の静的評価のずれを覚える（確かな値だけ）
     if (ci >= 0 && !excl && std::abs(best) < kMateBound) {
@@ -1314,6 +1323,7 @@ void publish_stats(const Job::Shared& sh) {
     const long long probe = c(SearchCounters::kTTProbe), hit = c(SearchCounters::kTTHit), tcut = c(SearchCounters::kTTCut);
     const long long lmr = c(SearchCounters::kLMR), lre = c(SearchCounters::kLMRResearch);
     const long long nmp = c(SearchCounters::kNMP), ncut = c(SearchCounters::kNMPCut);
+    const long long tstore = c(SearchCounters::kTTStore);
     // 実効分岐数：最後の 3 反復の、直前の反復に対するノード数の比の平均
     int last = 0;
     for (int d = 1; d <= kMaxDepth; d++) {
@@ -1333,9 +1343,9 @@ void publish_stats(const Job::Shared& sh) {
     char buf[512];
     std::snprintf(buf, sizeof buf,
                   "searchstats nodes=%lld qnodes=%lld qratio=%.3f fh=%lld fh1=%lld fh1rate=%.3f "
-                  "tt_probe=%lld tt_hit=%.3f tt_cut=%.3f lmr=%lld lmr_re=%.3f nmp=%lld nmp_cut=%.3f ebf=%.3f",
+                  "tt_probe=%lld tt_hit=%.3f tt_cut=%.3f tt_store=%.3f lmr=%lld lmr_re=%.3f nmp=%lld nmp_cut=%.3f ebf=%.3f",
                   n, c(SearchCounters::kQNodes), ratio(c(SearchCounters::kQNodes), n), cut, first,
-                  ratio(first, cut), probe, ratio(hit, probe), ratio(tcut, probe), lmr, ratio(lre, lmr), nmp,
+                  ratio(first, cut), probe, ratio(hit, probe), ratio(tcut, probe), ratio(tstore, n), lmr, ratio(lre, lmr), nmp,
                   ratio(ncut, nmp), ebf_n ? ebf_sum / ebf_n : 0.0);
     std::lock_guard<std::mutex> lk(g_stats_mu);
     g_stats_line = buf;
@@ -1348,6 +1358,7 @@ std::string last_stats_line() {
 }
 
 void Job::run() {
+    sh_.tt->set_keep_deep(sh_.opt.search_tt_keep);
     const long long start = now_ms();
     // 駆動スレッドは、cpus の先頭の論理CPUに固定する（§E2.4。ヘルパーは残りの CPU）
     if (!sh_.opt.cpus.empty()) {

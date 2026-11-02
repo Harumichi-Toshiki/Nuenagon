@@ -9,6 +9,7 @@
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -94,6 +95,8 @@ const SearchFlag kSearchFlags[] = {
     {"SearchDropLate", &search::Options::search_drop_late},
     {"SearchQCheck", &search::Options::search_qcheck},
     {"SearchLMRStrong", &search::Options::search_lmr_strong},
+    {"SearchStoreCut", &search::Options::search_store_cut},
+    {"SearchTTKeepDeep", &search::Options::search_tt_keep},
 };
 
 // 評価関数の設定（USI オプション §E2.3）と、読み込んだ重み
@@ -594,6 +597,48 @@ void cmd_bench(Engine& e, const EvalState& ev, std::istringstream& in) {
 
 }  // namespace
 
+// N8.2：差分で更新したハッシュと、局面から全計算したハッシュが、ランダムな手順のあいだ一致するかを確かめる。
+// 手は種（seed）で決まる。通常の手・打つ手・成り・取る手・null 手・戻しを混ぜる。
+std::string hashcheck_line(const Game& base, int len, unsigned seed) {
+    Game g = base;
+    std::mt19937 rng(seed);
+    long long checks = 0, bad = 0;
+    std::string first;
+    Move moves[MAX_LEGAL_MOVES];
+    int depth = 0;
+    auto check = [&](const char* what) {
+        checks++;
+        if (g.board.zobrist_key != g.board.calc_zobrist_key_full()) {
+            if (!bad++) first = std::string(what) + " " + g.board.to_sfen_key();
+        }
+    };
+    for (int i = 0; i < len; i++) {
+        const int r = (int)(rng() % 100);
+        if (r < 10 && depth > 0) {
+            g.pop();
+            depth--;
+            check("pop");
+            continue;
+        }
+        if (r < 20) {
+            g.push_null();
+            depth++;
+            check("null");
+            continue;
+        }
+        const int n = (int)(g.gen_legal(moves) - moves);
+        if (n == 0) {  // 手が無ければ、最初の局面に戻す
+            g = base;
+            depth = 0;
+            continue;
+        }
+        g.push(moves[rng() % n]);
+        depth++;
+        check("push");
+    }
+    return "hashcheck checks=" + std::to_string(checks) + " bad=" + std::to_string(bad) + (bad ? " first=" + first : "");
+}
+
 int main() {
     init_bitboards();
     init_zobrist();
@@ -748,6 +793,12 @@ int main() {
         else if (cmd == "perft") {
             int depth = 0;
             if (in >> depth) reply("perft " + std::to_string(perft(game.board, depth)));
+        }
+        else if (cmd == "hashcheck") {
+            int len = 200;
+            unsigned seed = 1;
+            in >> len >> seed;
+            reply(hashcheck_line(game, len, seed));
         }
         else if (cmd == "key") {
             std::ostringstream hex;

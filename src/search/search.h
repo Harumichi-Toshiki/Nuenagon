@@ -84,6 +84,8 @@ struct Options {
     int search_rfp_depth = 3;           // SearchRFPDepth：RFP を使う最大の深さ（7 は長い詰将棋を 13 問に減らす。3 なら 16 問）
     int search_singular_margin = 3;     // SearchSingularMargin：singular の余裕（深さ1あたり、点数。sbeta = TT の値 − 余裕 × 深さ）
     int search_probcut_margin = 200;    // SearchProbCutMargin：ProbCut の余裕（点数。rbeta = β + 余裕）
+    bool search_tt_keep = false;        // SearchTTKeepDeep：同じ世代で、深い項目を浅い保存（静止探索など）で上書きしない（N8.2）
+    bool search_store_cut = true;      // SearchStoreCut：RFP・NMP・ProbCut で打ち切った節点も、下限として置換表に保存する（N8.2）
     bool search_lmr_strong = false;     // SearchLMRStrong：並べ替えの点数（履歴＋連続履歴）が負の静かな手は、LMR で 1 段多く減らす（N8.1）
     int search_corr_rate = 64;          // SearchCorrRate：補正の更新の速さ（大きいほど遅い。更新量 = 差 × min(深さ,8) / 値）
 
@@ -166,6 +168,7 @@ public:
     void resize(int mb);
     void clear();
     void new_generation() { gen_ = (uint8_t)(gen_ + 1); }
+    void set_keep_deep(bool b) { keep_deep_ = b; }  // SearchTTKeepDeep：今の世代で深いものは、浅い保存で消さない
     bool probe(uint64_t key, TTEntry& e) const;
     void store(uint64_t key, int depth, int score, int bound, const Move& m, bool has_move);
     int hashfull() const;  // 千分率（先頭1000項目のうち今の世代のもの）
@@ -177,6 +180,7 @@ private:
     std::unique_ptr<Slot[]> slots_;
     size_t size_ = 0;
     uint8_t gen_ = 0;
+    bool keep_deep_ = false;
 };
 
 // スレッドプール（§E5.2）。探索スレッドを起動時に作り、ジョブの作業（ヘルパー）を受け付ける。
@@ -219,7 +223,7 @@ struct ProbeOut {
 
 // 探索の統計（N8.1。決定的モードの結果は変えない。searchstats で 1 行に出す）
 struct SearchCounters {
-    enum { kQNodes, kCutNodes, kFirstCut, kTTProbe, kTTHit, kTTCut, kLMR, kLMRResearch, kNMP, kNMPCut, kN };
+    enum { kQNodes, kCutNodes, kFirstCut, kTTProbe, kTTHit, kTTCut, kLMR, kLMRResearch, kNMP, kNMPCut, kTTStore, kN };
     std::atomic<long long> c[kN];
     std::atomic<long long> depth_nodes[kMaxDepth + 2];  // 反復の深さごとの累計ノード数（EBF に使う）
     SearchCounters() {
