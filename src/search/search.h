@@ -82,6 +82,9 @@ struct Options {
     int search_futility_margin = 250;   // SearchFutilityMargin：futility の深さ1あたりの余裕
     int search_see_margin = 40;         // SearchSEEMargin：SEE 枝刈りの静かな手の閾値（深さ1あたり）
     int search_rfp_depth = 3;           // SearchRFPDepth：RFP を使う最大の深さ（7 は長い詰将棋を 13 問に減らす。3 なら 16 問）
+    int search_singular_margin = 3;     // SearchSingularMargin：singular の余裕（深さ1あたり、点数。sbeta = TT の値 − 余裕 × 深さ）
+    int search_probcut_margin = 200;    // SearchProbCutMargin：ProbCut の余裕（点数。rbeta = β + 余裕）
+    int search_corr_rate = 64;          // SearchCorrRate：補正の更新の速さ（大きいほど遅い。更新量 = 差 × min(深さ,8) / 値）
 
     // 並べ替え・静止探索の入り切り（既定は true。false なら N5H と同じ動き）
     bool search_order_see = true;       // SearchOrderSEE：駒を取る手を SEE で分ける（false なら MVV-LVA）
@@ -90,6 +93,20 @@ struct Options {
     bool search_qsee = false;            // SearchQSEE：静止探索で SEE が負の取る手を読まない（false なら N5 の簡易判定）
     bool search_lazy_legal = true;      // SearchLazyLegal：疑似合法手で生成し、指した後に自玉の安全を確かめる（false なら合法手で生成）
     bool search_rfp_guard = false;      // SearchRFPGuard：相手の玉の逃げ道が1つ以下の節点では RFP を使わない（N5.5 の測定で効果が無いため既定は false）
+
+    // N8（探索の深化。既定 false は N7 と同じ動き。測定で既定を決める）
+    bool search_singular = false;       // SearchSingular：置換表の手が他より明らかに良いとき 1 手延長（multi-cut・負の延長を含む）
+    bool search_probcut = false;        // SearchProbCut：取る手の浅い探索で β を大きく超えたら、深く読まずに返す
+    bool search_lmr_history = false;    // SearchLMRHistory：LMR をカットノードで増やし、履歴の効きを細かくする
+    bool search_cont_learn = false;     // SearchContLearn：連続履歴を学習する（N7 は ContHistory を読むだけで書いていなかった）
+    bool search_cont_deep = false;      // SearchContDeep：連続履歴に 4 手前（1・2・4 手前）を使う
+    bool search_cap_hist = false;       // SearchCapHist：取る手の履歴（攻め駒・取られる駒の種類ごと）で並べ替える
+    bool search_corr = false;           // SearchCorrHist：玉の位置ごとに、探索の結果と静的評価のずれを覚えて補正する
+    bool search_check_ext = false;      // SearchCheckExt：王手になる手を 1 手延長する
+    bool search_king_danger = false;    // SearchKingDanger：相手の玉の逃げ道が1つ以下の節点では、LMR と静かな手の枝刈りを使わない
+    bool search_singular_double = false; // SearchSingularDouble：他の手が十分に劣るとき、singular の延長を 2 手にする
+    bool search_drop_late = false;      // SearchDropLate：打つ手を、他の静かな手の後ろに並べる
+    bool search_qcheck = false;         // SearchQCheck：静止探索の最初の 1 手で、王手になる静かな手（SEE ≥ 0）も読む
 
     // ヒントの使い方（DJP の hint_weight・hint_lmr_threshold。§E5.5）
     double hint_weight = 1.0;           // 0 なら、ヒントを並べ替えにも LMR にも使わない

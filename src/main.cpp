@@ -58,6 +58,9 @@ const SearchSpin kSearchSpins[] = {
     {"SearchFutilityMargin", &search::Options::search_futility_margin, 0, 1000},
     {"SearchSEEMargin", &search::Options::search_see_margin, 0, 500},
     {"SearchRFPDepth", &search::Options::search_rfp_depth, 0, 20},
+    {"SearchSingularMargin", &search::Options::search_singular_margin, 0, 50},
+    {"SearchProbCutMargin", &search::Options::search_probcut_margin, 0, 1000},
+    {"SearchCorrRate", &search::Options::search_corr_rate, 1, 1024},
 };
 
 const SearchFlag kSearchFlags[] = {
@@ -78,6 +81,18 @@ const SearchFlag kSearchFlags[] = {
     {"SearchQSEE", &search::Options::search_qsee},
     {"SearchLazyLegal", &search::Options::search_lazy_legal},
     {"SearchRFPGuard", &search::Options::search_rfp_guard},
+    {"SearchSingular", &search::Options::search_singular},
+    {"SearchProbCut", &search::Options::search_probcut},
+    {"SearchLMRHistory", &search::Options::search_lmr_history},
+    {"SearchContLearn", &search::Options::search_cont_learn},
+    {"SearchContDeep", &search::Options::search_cont_deep},
+    {"SearchCapHist", &search::Options::search_cap_hist},
+    {"SearchCorrHist", &search::Options::search_corr},
+    {"SearchCheckExt", &search::Options::search_check_ext},
+    {"SearchKingDanger", &search::Options::search_king_danger},
+    {"SearchSingularDouble", &search::Options::search_singular_double},
+    {"SearchDropLate", &search::Options::search_drop_late},
+    {"SearchQCheck", &search::Options::search_qcheck},
 };
 
 // 評価関数の設定（USI オプション §E2.3）と、読み込んだ重み
