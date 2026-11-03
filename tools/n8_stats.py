@@ -15,6 +15,9 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 import n5_cases as C  # noqa: E402
 import test_n8_acceptance as T  # noqa: E402
 
+# tests/n5_cases.py の 3 番目の局面には非合法手（2b2c）があるので、2f2e までに切る（テストは変えない）
+POSITIONS = [p.replace(' 2b2c', '') for p in C.SPEED_POSITIONS]
+
 KEYS = ["nodes", "qratio", "fh", "fh1", "fh1rate", "tt_hit", "tt_cut", "lmr", "lmr_re", "nmp", "nmp_cut", "ebf"]
 
 
@@ -32,7 +35,7 @@ def main():
     e = T.start(os.path.abspath(a.exe), [("Deterministic", "true")] + opts)
     rows = []
     try:
-        for pos in C.SPEED_POSITIONS:
+        for pos in POSITIONS:
             e.send("usinewgame")
             e.send(C.pos_cmd(pos))
             e.send(f"go nodes {a.nodes}")

@@ -85,13 +85,23 @@ struct Options {
     int search_singular_margin = 3;     // SearchSingularMargin：singular の余裕（深さ1あたり、点数。sbeta = TT の値 − 余裕 × 深さ）
     int search_probcut_margin = 200;    // SearchProbCutMargin：ProbCut の余裕（点数。rbeta = β + 余裕）
     bool search_tt_keep = false;        // SearchTTKeepDeep：同じ世代で、深い項目を浅い保存（静止探索など）で上書きしない（N8.2）
+    bool search_rfp2 = false;           // SearchRFP2：RFP を残り深さ 12 まで、余裕は小さく。詰みを守る条件つき（N8.3）
+    bool search_fut2 = false;           // SearchFut2：静かな手の親の futility（残り深さ 12 まで、余裕は深さに比例）
+    bool search_hist_prune = false;     // SearchHistPrune：連続履歴が悪い静かな手を、浅い深さで飛ばす
+    bool search_lmr2 = true;           // SearchLMR2：LMR を取る手にも、残り深さ 2 以上に広げる。カット・TT の手・履歴で調整
+    int search_rfp2_depth = 12;         // SearchRFP2Depth：RFP2 を使う最大の残り深さ
+    int search_rfp2_margin = 80;        // SearchRFP2Margin：RFP2 の深さ1あたりの余裕（点数）
+    int search_hist_prune_margin = 3000; // SearchHistPruneMargin：連続履歴の閾値（深さ1あたり）
+    int search_qsee_min = 0;            // SearchQSEEMin：静止探索で SEE がこれより悪い取る手は読まない（SearchQSEE が true のとき）
+    bool search_qrecap = false;         // SearchQRecap：静止探索の深い段（3 手目以降）は、直前の手のマスへの取り返しだけ読む（N8.3）
+    int search_qcheck_max = 2;          // SearchQCheckMax：静止探索の最初の段で読む王手の数の上限（SearchQCheck が true のとき）
     bool search_store_cut = true;      // SearchStoreCut：RFP・NMP・ProbCut で打ち切った節点も、下限として置換表に保存する（N8.2）
     bool search_lmr_strong = false;     // SearchLMRStrong：並べ替えの点数（履歴＋連続履歴）が負の静かな手は、LMR で 1 段多く減らす（N8.1）
     int search_corr_rate = 64;          // SearchCorrRate：補正の更新の速さ（大きいほど遅い。更新量 = 差 × min(深さ,8) / 値）
 
     // 並べ替え・静止探索の入り切り（既定は true。false なら N5H と同じ動き）
     bool search_order_see = true;       // SearchOrderSEE：駒を取る手を SEE で分ける（false なら MVV-LVA）
-    bool search_history_gravity = false; // SearchHistoryGravity：履歴を減衰つきで更新し、試した静かな手を減点する（false なら加算のみ）
+    bool search_history_gravity = true; // SearchHistoryGravity：履歴を減衰つきで更新し、試した静かな手を減点する（false なら加算のみ）
     bool search_counter_move = false;    // SearchCounterMove：カウンター手を並べ替えに使う
     bool search_qsee = false;            // SearchQSEE：静止探索で SEE が負の取る手を読まない（false なら N5 の簡易判定）
     bool search_lazy_legal = true;      // SearchLazyLegal：疑似合法手で生成し、指した後に自玉の安全を確かめる（false なら合法手で生成）
@@ -161,6 +171,7 @@ struct TTEntry {
     int bound = kExact;
     bool has_move = false;
     Move move{};
+    bool pv = false;        // その局面が PV だった（N8.3：RFP を使わない目安）
 };
 
 class TranspositionTable {
@@ -170,7 +181,7 @@ public:
     void new_generation() { gen_ = (uint8_t)(gen_ + 1); }
     void set_keep_deep(bool b) { keep_deep_ = b; }  // SearchTTKeepDeep：今の世代で深いものは、浅い保存で消さない
     bool probe(uint64_t key, TTEntry& e) const;
-    void store(uint64_t key, int depth, int score, int bound, const Move& m, bool has_move);
+    void store(uint64_t key, int depth, int score, int bound, const Move& m, bool has_move, bool pv = false);
     int hashfull() const;  // 千分率（先頭1000項目のうち今の世代のもの）
 private:
     struct Slot {

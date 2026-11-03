@@ -59,6 +59,11 @@ const SearchSpin kSearchSpins[] = {
     {"SearchFutilityMargin", &search::Options::search_futility_margin, 0, 1000},
     {"SearchSEEMargin", &search::Options::search_see_margin, 0, 500},
     {"SearchRFPDepth", &search::Options::search_rfp_depth, 0, 20},
+    {"SearchRFP2Depth", &search::Options::search_rfp2_depth, 0, 30},
+    {"SearchRFP2Margin", &search::Options::search_rfp2_margin, 0, 1000},
+    {"SearchHistPruneMargin", &search::Options::search_hist_prune_margin, 0, 100000},
+    {"SearchQSEEMin", &search::Options::search_qsee_min, -2000, 2000},
+    {"SearchQCheckMax", &search::Options::search_qcheck_max, 0, 20},
     {"SearchSingularMargin", &search::Options::search_singular_margin, 0, 50},
     {"SearchProbCutMargin", &search::Options::search_probcut_margin, 0, 1000},
     {"SearchCorrRate", &search::Options::search_corr_rate, 1, 1024},
@@ -96,6 +101,11 @@ const SearchFlag kSearchFlags[] = {
     {"SearchQCheck", &search::Options::search_qcheck},
     {"SearchLMRStrong", &search::Options::search_lmr_strong},
     {"SearchStoreCut", &search::Options::search_store_cut},
+    {"SearchRFP2", &search::Options::search_rfp2},
+    {"SearchFut2", &search::Options::search_fut2},
+    {"SearchHistPrune", &search::Options::search_hist_prune},
+    {"SearchQRecap", &search::Options::search_qrecap},
+    {"SearchLMR2", &search::Options::search_lmr2},
     {"SearchTTKeepDeep", &search::Options::search_tt_keep},
 };
 
