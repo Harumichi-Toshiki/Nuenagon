@@ -1131,15 +1131,15 @@ void Worker::iterate(std::vector<RootMove>& rm, int max_depth, const F* on_depth
                 beta = std::min(kInf, prev + delta);
             }
             for (;;) {
-                search_root(depth, alpha, beta, pv, rm);
+                const int best = search_root(depth, alpha, beta, pv, rm);
                 if (sh_.stop.load(std::memory_order_relaxed)) break;
-                // aspiration window の失敗：窓を広げて読み直す
-                if (alpha > -kInf && rm[pv].score <= alpha) {
+                // aspiration window の失敗：窓を広げて読み直す。判定は根の最善値（先頭以外の手の fail-high も含む）
+                if (alpha > -kInf && best <= alpha) {
                     delta *= 2;
                     alpha = delta > 500 ? -kInf : std::max(-kInf, alpha - delta);
                     continue;
                 }
-                if (beta < kInf && rm[pv].score >= beta) {
+                if (beta < kInf && best >= beta) {
                     delta *= 2;
                     beta = delta > 500 ? kInf : std::min(kInf, beta + delta);
                     continue;
