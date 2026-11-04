@@ -2,6 +2,7 @@
 // ルートの手ごとの記録（§E5.4）、ヒントの表（§E5.5）、パスの起点（§E5.6）、出来事の通知（§E5.8）。
 // 重み（Network）は評価に使うだけで、手の進め・戻しは Game（差分更新つき）を使う。
 #pragma once
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -121,6 +122,48 @@ struct Options {
     bool search_drop_late = false;      // SearchDropLate：打つ手を、他の静かな手の後ろに並べる
     bool search_qcheck = false;         // SearchQCheck：静止探索の最初の 1 手で、王手になる静かな手（SEE ≥ 0）も読む
 
+    // 探索の数値の調整（N8.5）：既定値は以前に直接書かれていた値（docs/SEARCH_PARAMS.md）
+    int search_p_rfp_improving = 60;        // SearchP_RFPImproving：RFP の余裕に足す（改善している局面）
+    int search_p_rfp2_improving = 60;       // SearchP_RFP2Improving：RFP2 の同上
+    int search_p_razor_depth = 2;           // SearchP_RazorDepth：razoring を使う最大の残り深さ
+    int search_p_nmp_depth = 3;             // SearchP_NMPDepth：null move を試す最小の残り深さ
+    int search_p_nmp_base = 2;              // SearchP_NMPBase：null move の削減量 = base + depth / div
+    int search_p_nmp_div = 4;               // SearchP_NMPDiv
+    int search_p_nmp_dyn_base = 3;          // SearchP_NMPDynBase：SearchNullMoveDynamic のときの削減量 base + depth / dyn_div + min(cap, (評価−β) / scale)
+    int search_p_nmp_dyn_div = 3;           // SearchP_NMPDynDiv
+    int search_p_nmp_dyn_cap = 3;           // SearchP_NMPDynCap
+    int search_p_nmp_dyn_scale = 200;       // SearchP_NMPDynScale
+    int search_p_nmp_verify_depth = 12;     // SearchP_NMPVerifyDepth：この残り深さ以上で検証探索をする
+    int search_p_iir_depth = 4;             // SearchP_IIRDepth：内部の反復深化を使う最小の残り深さ
+    int search_p_sing_depth = 7;            // SearchP_SingularDepth：singular を試す最小の残り深さ
+    int search_p_sing_tt_depth = 3;         // SearchP_SingularTTDepth：置換表の深さが残り深さからこれ以内
+    int search_p_probcut_depth = 5;         // SearchP_ProbCutDepth：ProbCut を使う最小の残り深さ
+    int search_p_probcut_reduce = 4;        // SearchP_ProbCutReduce：ProbCut の浅い探索で減らす深さ
+    int search_p_fut_depth = 3;             // SearchP_FutDepth：futility と手の数の枝刈りの最大の残り深さ
+    int search_p_mc_base = 6;               // SearchP_MoveCountBase：手の数の枝刈り = base + scale * depth^2 手目以降を刈る
+    int search_p_mc_scale = 3;              // SearchP_MoveCountScale
+    int search_p_lmp_depth = 8;             // SearchP_LMPDepth：LMP の最大の残り深さ
+    int search_p_lmp_base = 3;              // SearchP_LMPBase：LMP の閾値 = scale * (base + depth^2) / div
+    int search_p_lmp_div = 2;               // SearchP_LMPDiv：改善していない局面の割り
+    int search_p_fut2_depth = 12;           // SearchP_Fut2Depth：親の futility の最大の残り深さ
+    int search_p_fut2_base = 100;           // SearchP_Fut2Base：親の futility の余裕 = base + slope * depth + 履歴（±clamp）
+    int search_p_fut2_slope = 120;          // SearchP_Fut2Slope
+    int search_p_fut2_clamp = 300;          // SearchP_Fut2Clamp
+    int search_p_histprune_depth = 3;       // SearchP_HistPruneDepth：連続履歴による刈り込みの最大の残り深さ
+    int search_p_see_depth = 6;             // SearchP_SEEPruneDepth：SEE による枝刈りの最大の残り深さ
+    int search_p_see_cap_margin = 100;      // SearchP_SEEPruneCapMargin：取る手の SEE の下限 = -margin * depth
+    int search_p_lmr_base = 75;             // SearchP_LMRBase：LMR の表の係数（÷100。75 = 0.75）
+    int search_p_lmr_div = 225;             // SearchP_LMRDiv：LMR の表の除数（÷100。225 = 2.25）
+    int search_p_lmr_hist_clamp = 2;        // SearchP_LMRHistClamp：履歴による LMR の増減の上限（±）
+    int search_p_lmr_legal = 4;             // SearchP_LMRLegal：LMR（簡易）を使い始める手の順番
+    int search_p_lmr_legal2 = 7;            // SearchP_LMRLegal2：簡易 LMR で 2 段減らす手の順番
+    int search_p_hist_bonus_cap = 1600;     // SearchP_HistBonusCap：履歴のボーナス・減点の上限（depth^2 の上限）
+    int search_p_hist_max = 1 << 20;        // SearchP_HistMax：履歴の値の上限（減衰なしの加算）
+    int search_p_asp_depth = 4;             // SearchP_AspDepth：aspiration window を使う最小の深さ
+    int search_p_asp_delta = 20;            // SearchP_AspDelta：aspiration window の初期幅
+    int search_p_asp_max = 500;             // SearchP_AspMaxDelta：この幅を超えたら窓を全幅にする
+    int search_p_corr_depth_cap = 8;        // SearchP_CorrDepthCap：静的評価の補正の学習に使う深さの上限
+    int search_rfp2_guard = 0;              // SearchRFP2Guard：RFP2 の詰み守り（0＝今の条件、1＝相手の 1 手詰めの脅しを見る、2＝1 に加えて詰みの点数に近い β を除く）
     // ヒントの使い方（DJP の hint_weight・hint_lmr_threshold。§E5.5）
     double hint_weight = 1.0;           // 0 なら、ヒントを並べ替えにも LMR にも使わない
     double hint_lmr_threshold = 0.10;   // この確率以上の手は、LMR で減らさない
@@ -279,6 +322,7 @@ public:
         TranspositionTable* tt = nullptr;
         const HintTable* hints = nullptr;
         Options opt;
+        std::array<std::array<int, 64>, 64> lmr{};  // LMR の削減量の表（Job の作成時に opt から作る）
         EvalRef ev;
         InfoSink sink;
         RootReport root_report;

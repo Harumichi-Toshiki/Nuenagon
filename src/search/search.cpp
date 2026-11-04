@@ -63,16 +63,14 @@ void gravity(T& h, int bonus) {
     h = (T)std::clamp(v + bonus - v * std::abs(bonus) / kHistLimit, -kHistLimit, kHistLimit);
 }
 
-// LMR の削減量の表（§E11）：log(深さ) × log(手の順番)。0 は削減なし
-int lmr_table(int depth, int move_no) {
-    static const auto table = [] {
-        std::array<std::array<int, 64>, 64> t{};
-        for (int d = 1; d < 64; d++) {
-            for (int m = 1; m < 64; m++) t[d][m] = (int)(0.75 + std::log((double)d) * std::log((double)m) / 2.25);
-        }
-        return t;
-    }();
-    return table[std::min(depth, 63)][std::min(move_no, 63)];
+// LMR の削減量の表（§E11）：log(深さ) × log(手の順番)。0 は削減なし。係数は SearchP_LMRBase / 100 と SearchP_LMRDiv / 100
+std::array<std::array<int, 64>, 64> build_lmr(int base100, int div100) {
+    std::array<std::array<int, 64>, 64> t{};
+    const double base = base100 / 100.0, div = div100 / 100.0;
+    for (int d = 1; d < 64; d++) {
+        for (int m = 1; m < 64; m++) t[d][m] = (int)(base + std::log((double)d) * std::log((double)m) / div);
+    }
+    return t;
 }
 
 // 王の周り（chebyshev の距離 2 以内）か、同じ筋・段・斜めにあるマスか（王手になりうる手の目安）
@@ -294,6 +292,23 @@ public:
     int search_root(int depth, int alpha, int beta, int pv_idx, std::vector<RootMove>& rm);
 
     void count(int i) { sh_.cnt.c[i].fetch_add(1, std::memory_order_relaxed); }
+    int lmr_at(int depth, int move_no) const { return sh_.lmr[std::min(depth, 63)][std::min(move_no, 63)]; }
+    // RFP2 の詰み守り（N8.5）。0 は今の条件（check_cand：玉の近くに王手になりうる手が無く、1 手詰めも無いこと）。
+    // 1・2 は、手番の側が手を指さずに相手に手番を渡したとき、相手に 1 手詰めが無いこと（脅しを見る）。2 はさらに詰みの点数に近い β を除く
+    bool rfp2_ok(bool check_cand, const Move* tmp, int nn, Move& mm, int beta) {
+        const int g = sh_.opt.search_rfp2_guard;
+        if (g == 0) return !check_cand && !find_mate1(tmp, nn, mm);
+        if (find_mate1(tmp, nn, mm)) return false;
+        game_.push_null();
+        Move t2[MAX_LEGAL_MOVES];
+        Move m2{};
+        const int n2 = (int)(game_.gen_pseudo(t2) - t2);
+        const bool threat = find_mate1(t2, n2, m2);
+        game_.pop();
+        if (threat) return false;
+        if (g == 2 && std::abs(beta) >= kMateBound - 500) return false;
+        return true;
+    }
     bool aborted();                 // 止める条件（停止・時間・ノード数・差分更新の検査）を見る
     long long total_nodes() const { return sh_.nodes.load(std::memory_order_relaxed) + pending_; }
     int evaluate() const;
@@ -450,7 +465,7 @@ int Worker::cap_index(const Move& m) const {
 // 取る手で β カットが起きたとき：この取る手を強め、先に試した取る手を弱める（SearchCapHist）
 void Worker::cap_cutoff(int cidx, int depth, const int* tried, int ntried) {
     if (!sh_.opt.search_cap_hist || cidx < 0) return;
-    const int bonus = std::min(depth * depth, 1600);
+    const int bonus = std::min(depth * depth, sh_.opt.search_p_hist_bonus_cap);
     gravity(caphist_[cidx], bonus);
     for (int i = 0; i < ntried; i++) gravity(caphist_[tried[i]], -bonus);
 }
@@ -509,15 +524,15 @@ void Worker::record_quiet_cutoff(const Move& m, int depth, int ply, const Move* 
     if (sh_.opt.search_counter_move && cur_key_[ply] >= 0) counter_[cur_key_[ply]] = m;
     if (!sh_.opt.search_history_gravity) {  // N5 の履歴（加算のみ。試した手の減点はしない）
         int& h = history_[(game_.board.turn * kHistSize + hist_index(m)) * 81 + m.to];
-        h = std::min(h + depth * depth, 1 << 20);
+        h = std::min(h + depth * depth, sh_.opt.search_p_hist_max);
         if (sh_.opt.search_cont_hist && sh_.opt.search_cont_learn) {  // N8：連続履歴も学習する（N7 では書いていなかった）
-            const int bonus = std::min(depth * depth, 1600);
+            const int bonus = std::min(depth * depth, sh_.opt.search_p_hist_bonus_cap);
             cont_update(ply, piece_key(m), bonus);
             for (int i = 0; i < nq; i++) cont_update(ply, piece_key(quiets[i]), -bonus);
         }
         return;
     }
-    const int bonus = std::min(depth * depth, 1600);
+    const int bonus = std::min(depth * depth, sh_.opt.search_p_hist_bonus_cap);
     update_quiet(m, bonus, ply);
     for (int i = 0; i < nq; i++) update_quiet(quiets[i], -bonus, ply);
 }
@@ -770,7 +785,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     const bool danger = o.search_king_danger && !in_check && king_boxed();
 
     // razoring：浅い深さで評価が α を大きく下回るなら、静止探索で確かめて返す
-    if (o.search_razoring && prune_ok && depth <= 2 && static_eval + o.search_razor_margin * depth <= alpha) {
+    if (o.search_razoring && prune_ok && depth <= o.search_p_razor_depth && static_eval + o.search_razor_margin * depth <= alpha) {
         const int v = qsearch(alpha, alpha + 1, ply, 0);
         if (sh_.stop.load(std::memory_order_relaxed)) return 0;
         if (v <= alpha) return v;
@@ -780,7 +795,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     // 玉が囲まれた局面・詰みの点数に近い値では使わない。返す値は静的評価と β の中間（β 寄り）。
     if (o.search_rfp2 && prune_ok && depth <= o.search_rfp2_depth && std::abs(beta) < kMateBound &&
         std::abs(static_eval) < kMateBound && !(has_tt && !is_capture(game_.board, tt_move)) && !tte_pv(tte) &&
-        static_eval - o.search_rfp2_margin * depth + (improving ? 60 : 0) >= beta) {
+        static_eval - o.search_rfp2_margin * depth + (improving ? o.search_p_rfp2_improving : 0) >= beta) {
         // 相手の玉の逃げ道が 2 つ以下なら詰みを疑う。1 手詰めの判定も先に行う
         const Board& bd = game_.board;
         const int opk = bd.king_sq[1 - bd.turn];
@@ -806,7 +821,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
             check_cand = opk >= 0 && (near_line(cm.to, opk % 9, opk / 9) ||
                                       (!cm.is_drop && near_line(cm.from, opk % 9, opk / 9)));
         }
-        if (!check_cand && !find_mate1(tmp, nn, mm)) {
+        if (rfp2_ok(check_cand, tmp, nn, mm, beta)) {
             if (o.search_store_cut && !excl) sh_.tt->store(key, depth, to_tt((static_eval + beta) / 2, ply), kLower, Move{}, false);
             return (static_eval + beta) / 2;
         }
@@ -814,14 +829,15 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
 
     // reverse futility（RFP）：評価が β を大きく超えているなら、浅い探索を省いてそのまま返す
     if (o.search_rfp && prune_ok && depth <= o.search_rfp_depth && std::abs(beta) < kMateBound && !(o.search_rfp_guard && king_boxed()) &&
-        static_eval - o.search_rfp_margin * depth + (improving ? 60 : 0) >= beta) {
+        static_eval - o.search_rfp_margin * depth + (improving ? o.search_p_rfp_improving : 0) >= beta) {
         if (o.search_store_cut && !excl) sh_.tt->store(key, depth, to_tt(static_eval, ply), kLower, Move{}, false);
         return static_eval;
     }
 
     // null move pruning（§E5.1）。削減量は N4.1 の 2 + depth/4、または深さと評価値の差で決める（§E11）
-    if (prune_ok && allow_null && depth >= 3 && static_eval >= beta && has_non_pawn_material()) {
-        const int r = o.search_null_dynamic ? 3 + depth / 3 + std::min(3, (static_eval - beta) / 200) : 2 + depth / 4;
+    if (prune_ok && allow_null && depth >= o.search_p_nmp_depth && static_eval >= beta && has_non_pawn_material()) {
+        const int r = o.search_null_dynamic ? o.search_p_nmp_dyn_base + depth / o.search_p_nmp_dyn_div + std::min(o.search_p_nmp_dyn_cap, (static_eval - beta) / o.search_p_nmp_dyn_scale)
+                                            : o.search_p_nmp_base + depth / o.search_p_nmp_div;
         count(SearchCounters::kNMP);
         game_.push_null();
         cur_key_[ply + 1] = -1;
@@ -831,7 +847,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
         if (s >= beta) {
             count(SearchCounters::kNMPCut);
             if (o.search_store_cut && !excl) sh_.tt->store(key, depth, to_tt(s, ply), kLower, Move{}, false);
-            if (!(o.search_null_dynamic && depth >= 12)) return s >= kMateBound ? beta : s;
+            if (!(o.search_null_dynamic && depth >= o.search_p_nmp_verify_depth)) return s >= kMateBound ? beta : s;
             // 深いところでは、手を渡さずに確かめる（検証探索）。確かめられなければ普通に読む
             const int v = negamax(depth - r, beta - 1, beta, ply, false, cut);
             if (sh_.stop.load(std::memory_order_relaxed)) return 0;
@@ -840,12 +856,12 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     }
 
     // 内部の反復深化（IIR）：置換表に手が無ければ、手の順番の見当が付かないので1手浅く読む
-    if (o.search_iir && !in_check && !has_tt && depth >= 4) depth--;
+    if (o.search_iir && !in_check && !has_tt && depth >= o.search_p_iir_depth) depth--;
 
     // singular extension（N8）：置換表の手が、他の手より明らかに良いかを、その手を除いた浅い探索で確かめる。
     // 明らかに良ければ 1 手延長する。他の手も β を超えるなら、β で返す（multi-cut）。手が良くても他も良いなら負の延長。
     int extension = 0;
-    if (o.search_singular && !excl && has_tt && tte.found && depth >= 7 && tte.depth >= depth - 3 && tte.bound != kUpper) {
+    if (o.search_singular && !excl && has_tt && tte.found && depth >= o.search_p_sing_depth && tte.depth >= depth - o.search_p_sing_tt_depth && tte.bound != kUpper) {
         const int tv = from_tt(tte.score, ply);
         if (std::abs(tv) < kMateBound) {
             const int sbeta = tv - o.search_singular_margin * depth;
@@ -875,7 +891,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
     }
 
     // ProbCut（N8）：取る手（SEE ≥ 0）を浅く読んで、β を大きく超えるなら、深く読まずに返す
-    if (o.search_probcut && prune_ok && !excl && depth >= 5 && std::abs(beta) < kMateBound) {
+    if (o.search_probcut && prune_ok && !excl && depth >= o.search_p_probcut_depth && std::abs(beta) < kMateBound) {
         const int rbeta = beta + o.search_probcut_margin;
         for (int i = 0; i < n; i++) {
             const Move m = moves[i];
@@ -887,11 +903,11 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
             }
             cur_key_[ply + 1] = piece_key(m);
             int v = -qsearch(-rbeta, -rbeta + 1, ply + 1, 0);
-            if (v >= rbeta) v = -negamax(depth - 4, -rbeta, -rbeta + 1, ply + 1, true, !cut);
+            if (v >= rbeta) v = -negamax(depth - o.search_p_probcut_reduce, -rbeta, -rbeta + 1, ply + 1, true, !cut);
             game_.pop();
             if (sh_.stop.load(std::memory_order_relaxed)) return 0;
             if (v >= rbeta) {
-                if (o.search_store_cut && !excl) sh_.tt->store(key, depth - 3, to_tt(v, ply), kLower, Move{}, false);
+                if (o.search_store_cut && !excl) sh_.tt->store(key, depth - o.search_p_probcut_reduce + 1, to_tt(v, ply), kLower, Move{}, false);
                 return v;
             }
         }
@@ -922,24 +938,24 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
 
         // 枝刈り（PV でなく王手を受けていない局面で、最初の合法手の後。最善が詰まされる値のときは読む）
         if (prune_ok && legal > 0 && best > -kMateBound && !danger) {
-            if (quiet && depth <= 3 && static_eval + o.search_futility_margin * depth <= alpha) continue;  // futility（N4.1）
-            if (quiet && !o.search_lmp && depth <= 3 && legal >= 6 + 3 * depth * depth) continue;  // 手の数（N4.1）
+            if (quiet && depth <= o.search_p_fut_depth && static_eval + o.search_futility_margin * depth <= alpha) continue;  // futility（N4.1）
+            if (quiet && !o.search_lmp && depth <= o.search_p_fut_depth && legal >= o.search_p_mc_base + o.search_p_mc_scale * depth * depth) continue;  // 手の数（N4.1）
         }
         // 新しい枝刈りは、王手になりうる手には使わない（王手で詰む手を、静かな手として刈らないため）
         const int opp_k = game_.board.king_sq[1 - game_.board.turn];
         const bool maybe_check = opp_k >= 0 && (near_line(m.to, opp_k % 9, opp_k / 9) ||
                                                 (!m.is_drop && near_line(m.from, opp_k % 9, opp_k / 9)));
         if (prune_ok && legal > 0 && best > -kMateBound && !maybe_check && !danger) {
-            if (quiet && o.search_fut2 && depth <= 12 &&
-                static_eval + 100 + 120 * depth + std::clamp(quiet_score(m, ply) / 4096, -300, 300) <= alpha) continue;  // N8.3：親の futility
-            if (quiet && o.search_hist_prune && depth <= 3 && cont_sum(ply, piece_key(m)) < -o.search_hist_prune_margin * depth) continue;
-            if (quiet && o.search_lmp && depth <= 8 &&
-                legal >= o.search_lmp_scale * (3 + depth * depth) / (improving ? 1 : 2)) continue;  // LMP
+            if (quiet && o.search_fut2 && depth <= o.search_p_fut2_depth &&
+                static_eval + o.search_p_fut2_base + o.search_p_fut2_slope * depth + std::clamp(quiet_score(m, ply) / 4096, -o.search_p_fut2_clamp, o.search_p_fut2_clamp) <= alpha) continue;  // N8.3：親の futility
+            if (quiet && o.search_hist_prune && depth <= o.search_p_histprune_depth && cont_sum(ply, piece_key(m)) < -o.search_hist_prune_margin * depth) continue;
+            if (quiet && o.search_lmp && depth <= o.search_p_lmp_depth &&
+                legal >= o.search_lmp_scale * (o.search_p_lmp_base + depth * depth) / (improving ? 1 : o.search_p_lmp_div)) continue;  // LMP
             if (o.search_drop_prune && depth <= 2 && m.is_drop && quiet_drop_far(m)) continue;
-            if (o.search_see_prune && depth <= 6) {
+            if (o.search_see_prune && depth <= o.search_p_see_depth) {
                 // 相手の利きが無いマスへの静かな手は、SEE が 0 なので調べない
                 const bool hit = capture || game_.board.is_attacked(m.to, 1 - game_.board.turn);
-                if (hit && see(m) < (capture ? -100 * depth : -o.search_see_margin * depth)) continue;
+                if (hit && see(m) < (capture ? -o.search_p_see_cap_margin * depth : -o.search_see_margin * depth)) continue;
             }
         }
 
@@ -974,33 +990,33 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
             if (o.search_lmr2) {
                 // N8.3：取る手にも広げる。深さ・手の順番の表を基本に、PV・カット・TT の手（取る手）・履歴・改善で調整
                 if (depth >= 2 && !in_check && !gives_check && !danger) {
-                    int r = lmr_table(depth, legal);
+                    int r = lmr_at(depth, legal);
                     if (!o.search_improving || !improving) r++;
                     if (pv_node) r--;
                     if (cut) r++;
                     if (tt_capture) r++;
-                    if (quiet) r -= std::clamp(hs / 4096, -2, 2);
+                    if (quiet) r -= std::clamp(hs / 4096, -sh_.opt.search_p_lmr_hist_clamp, sh_.opt.search_p_lmr_hist_clamp);
                     else r /= 2;
                     red = std::clamp(r, 0, std::max(0, nd - 1));
                 }
             }
             else if (depth >= 3 && quiet && !in_check && !gives_check && !danger) {
                 if (o.search_lmr_table) {
-                    red = lmr_table(depth, legal);
+                    red = lmr_at(depth, legal);
                     if (!o.search_improving || !improving) red++;
                     if (o.search_lmr_strong && hs < 0) red++;
                     if (pv_node) red--;
                     if (o.search_lmr_history) {
                         // N8：カットノード（βカットが期待される節点）は多く減らし、履歴は細かく見る
                         if (cut) red++;
-                        red -= std::clamp(hs / 4096, -2, 2);
+                        red -= std::clamp(hs / 4096, -sh_.opt.search_p_lmr_hist_clamp, sh_.opt.search_p_lmr_hist_clamp);
                     }
                     else {
-                        red -= std::clamp(hs / 8192, -2, 2);  // 履歴の良い手は減らし、悪い手は増やす
+                        red -= std::clamp(hs / 8192, -sh_.opt.search_p_lmr_hist_clamp, sh_.opt.search_p_lmr_hist_clamp);  // 履歴の良い手は減らし、悪い手は増やす
                     }
                 }
-                else if (legal >= 4) {  // N5 の決まり：0 から数えて 3 番目以降の静かな手（legal は 1 から数える）
-                    red = legal >= 7 ? 2 : 1;
+                else if (legal >= o.search_p_lmr_legal) {  // N5 の決まり：0 から数えて 3 番目以降の静かな手（legal は 1 から数える）
+                    red = legal >= o.search_p_lmr_legal2 ? 2 : 1;
                 }
                 if (red > 0 && hint) {
                     for (const HintEntry& h : *hint) {
@@ -1055,7 +1071,7 @@ int Worker::negamax(int depth, int alpha, int beta, int ply, bool allow_null, bo
         const bool useful = bound == kExact || (bound == kLower && err > 0) || (bound == kUpper && err < 0);
         if (useful) {
             int& c = corr_[ci];
-            c += ((err * 256) - c) * std::min(depth, 8) / o.search_corr_rate;
+            c += ((err * 256) - c) * std::min(depth, o.search_p_corr_depth_cap) / o.search_corr_rate;
         }
     }
     return best;
@@ -1124,9 +1140,9 @@ void Worker::iterate(std::vector<RootMove>& rm, int max_depth, const F* on_depth
         int repass = 0;  // exact_all：同じ位置を読み直した回数（この段の中で数える）
         while (pv < multipv) {
             const int prev = rm[pv].score;
-            int delta = 20;
+            int delta = sh_.opt.search_p_asp_delta;
             int alpha = -kInf, beta = kInf;
-            if (depth >= 4) {
+            if (depth >= sh_.opt.search_p_asp_depth) {
                 alpha = std::max(-kInf, prev - delta);
                 beta = std::min(kInf, prev + delta);
             }
@@ -1136,12 +1152,12 @@ void Worker::iterate(std::vector<RootMove>& rm, int max_depth, const F* on_depth
                 // aspiration window の失敗：窓を広げて読み直す。判定は根の最善値（先頭以外の手の fail-high も含む）
                 if (alpha > -kInf && best <= alpha) {
                     delta *= 2;
-                    alpha = delta > 500 ? -kInf : std::max(-kInf, alpha - delta);
+                    alpha = delta > sh_.opt.search_p_asp_max ? -kInf : std::max(-kInf, alpha - delta);
                     continue;
                 }
                 if (beta < kInf && best >= beta) {
                     delta *= 2;
-                    beta = delta > 500 ? kInf : std::min(kInf, beta + delta);
+                    beta = delta > sh_.opt.search_p_asp_max ? kInf : std::min(kInf, beta + delta);
                     continue;
                 }
                 break;
@@ -1270,6 +1286,7 @@ Job::Job(const Game& root, const Limits& lim, const Options& opt, const EvalRef&
     sh_.tt = &tt;
     sh_.hints = opt.hint_weight > 0 ? hints : nullptr;  // hint_weight が 0 のときは、ヒントを使わない（§E5.5）
     sh_.opt = opt;
+    sh_.lmr = build_lmr(opt.search_p_lmr_base, opt.search_p_lmr_div);
     sh_.ev = ev;
     sh_.sink = std::move(sink);
     sh_.node_limit = lim.nodes;
