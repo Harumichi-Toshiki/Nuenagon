@@ -9,6 +9,7 @@
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -55,9 +56,58 @@ const SearchSpin kSearchSpins[] = {
     {"SearchRFPMargin", &search::Options::search_rfp_margin, 0, 1000},
     {"SearchLMPScale", &search::Options::search_lmp_scale, 1, 10},
     {"SearchRazorMargin", &search::Options::search_razor_margin, 0, 1000},
+    {"SearchP_RFPImproving", &search::Options::search_p_rfp_improving, 0, 300},
+    {"SearchP_RFP2Improving", &search::Options::search_p_rfp2_improving, 0, 300},
+    {"SearchP_RazorDepth", &search::Options::search_p_razor_depth, 0, 6},
+    {"SearchP_NMPDepth", &search::Options::search_p_nmp_depth, 1, 10},
+    {"SearchP_NMPBase", &search::Options::search_p_nmp_base, 0, 10},
+    {"SearchP_NMPDiv", &search::Options::search_p_nmp_div, 1, 16},
+    {"SearchP_NMPDynBase", &search::Options::search_p_nmp_dyn_base, 0, 10},
+    {"SearchP_NMPDynDiv", &search::Options::search_p_nmp_dyn_div, 1, 16},
+    {"SearchP_NMPDynCap", &search::Options::search_p_nmp_dyn_cap, 0, 10},
+    {"SearchP_NMPDynScale", &search::Options::search_p_nmp_dyn_scale, 1, 2000},
+    {"SearchP_NMPVerifyDepth", &search::Options::search_p_nmp_verify_depth, 1, 30},
+    {"SearchP_IIRDepth", &search::Options::search_p_iir_depth, 1, 12},
+    {"SearchP_SingularDepth", &search::Options::search_p_sing_depth, 1, 20},
+    {"SearchP_SingularTTDepth", &search::Options::search_p_sing_tt_depth, 0, 10},
+    {"SearchP_ProbCutDepth", &search::Options::search_p_probcut_depth, 1, 20},
+    {"SearchP_ProbCutReduce", &search::Options::search_p_probcut_reduce, 1, 12},
+    {"SearchP_FutDepth", &search::Options::search_p_fut_depth, 0, 8},
+    {"SearchP_MoveCountBase", &search::Options::search_p_mc_base, 0, 30},
+    {"SearchP_MoveCountScale", &search::Options::search_p_mc_scale, 1, 10},
+    {"SearchP_LMPDepth", &search::Options::search_p_lmp_depth, 1, 20},
+    {"SearchP_LMPBase", &search::Options::search_p_lmp_base, 0, 10},
+    {"SearchP_LMPDiv", &search::Options::search_p_lmp_div, 1, 4},
+    {"SearchP_Fut2Depth", &search::Options::search_p_fut2_depth, 0, 30},
+    {"SearchP_Fut2Base", &search::Options::search_p_fut2_base, -1000, 1000},
+    {"SearchP_Fut2Slope", &search::Options::search_p_fut2_slope, 0, 500},
+    {"SearchP_Fut2Clamp", &search::Options::search_p_fut2_clamp, 0, 2000},
+    {"SearchP_HistPruneDepth", &search::Options::search_p_histprune_depth, 0, 10},
+    {"SearchP_SEEPruneDepth", &search::Options::search_p_see_depth, 0, 12},
+    {"SearchP_SEEPruneCapMargin", &search::Options::search_p_see_cap_margin, 0, 1000},
+    {"SearchP_LMRBase", &search::Options::search_p_lmr_base, 0, 200},
+    {"SearchP_LMRDiv", &search::Options::search_p_lmr_div, 50, 1000},
+    {"SearchP_LMRHistClamp", &search::Options::search_p_lmr_hist_clamp, 0, 8},
+    {"SearchP_LMRLegal", &search::Options::search_p_lmr_legal, 1, 20},
+    {"SearchP_LMRLegal2", &search::Options::search_p_lmr_legal2, 1, 30},
+    {"SearchP_HistBonusCap", &search::Options::search_p_hist_bonus_cap, 1, 16384},
+    {"SearchP_HistMax", &search::Options::search_p_hist_max, 1000, 16777216},
+    {"SearchP_AspDepth", &search::Options::search_p_asp_depth, 1, 20},
+    {"SearchP_AspDelta", &search::Options::search_p_asp_delta, 1, 500},
+    {"SearchP_AspMaxDelta", &search::Options::search_p_asp_max, 50, 32000},
+    {"SearchP_CorrDepthCap", &search::Options::search_p_corr_depth_cap, 1, 32},
+    {"SearchRFP2Guard", &search::Options::search_rfp2_guard, 0, 2},
     {"SearchFutilityMargin", &search::Options::search_futility_margin, 0, 1000},
     {"SearchSEEMargin", &search::Options::search_see_margin, 0, 500},
     {"SearchRFPDepth", &search::Options::search_rfp_depth, 0, 20},
+    {"SearchRFP2Depth", &search::Options::search_rfp2_depth, 0, 30},
+    {"SearchRFP2Margin", &search::Options::search_rfp2_margin, 0, 1000},
+    {"SearchHistPruneMargin", &search::Options::search_hist_prune_margin, 0, 100000},
+    {"SearchQSEEMin", &search::Options::search_qsee_min, -2000, 2000},
+    {"SearchQCheckMax", &search::Options::search_qcheck_max, 0, 20},
+    {"SearchSingularMargin", &search::Options::search_singular_margin, 0, 50},
+    {"SearchProbCutMargin", &search::Options::search_probcut_margin, 0, 1000},
+    {"SearchCorrRate", &search::Options::search_corr_rate, 1, 1024},
 };
 
 const SearchFlag kSearchFlags[] = {
@@ -78,6 +128,26 @@ const SearchFlag kSearchFlags[] = {
     {"SearchQSEE", &search::Options::search_qsee},
     {"SearchLazyLegal", &search::Options::search_lazy_legal},
     {"SearchRFPGuard", &search::Options::search_rfp_guard},
+    {"SearchSingular", &search::Options::search_singular},
+    {"SearchProbCut", &search::Options::search_probcut},
+    {"SearchLMRHistory", &search::Options::search_lmr_history},
+    {"SearchContLearn", &search::Options::search_cont_learn},
+    {"SearchContDeep", &search::Options::search_cont_deep},
+    {"SearchCapHist", &search::Options::search_cap_hist},
+    {"SearchCorrHist", &search::Options::search_corr},
+    {"SearchCheckExt", &search::Options::search_check_ext},
+    {"SearchKingDanger", &search::Options::search_king_danger},
+    {"SearchSingularDouble", &search::Options::search_singular_double},
+    {"SearchDropLate", &search::Options::search_drop_late},
+    {"SearchQCheck", &search::Options::search_qcheck},
+    {"SearchLMRStrong", &search::Options::search_lmr_strong},
+    {"SearchStoreCut", &search::Options::search_store_cut},
+    {"SearchRFP2", &search::Options::search_rfp2},
+    {"SearchFut2", &search::Options::search_fut2},
+    {"SearchHistPrune", &search::Options::search_hist_prune},
+    {"SearchQRecap", &search::Options::search_qrecap},
+    {"SearchLMR2", &search::Options::search_lmr2},
+    {"SearchTTKeepDeep", &search::Options::search_tt_keep},
 };
 
 // 評価関数の設定（USI オプション §E2.3）と、読み込んだ重み
@@ -578,6 +648,48 @@ void cmd_bench(Engine& e, const EvalState& ev, std::istringstream& in) {
 
 }  // namespace
 
+// N8.2：差分で更新したハッシュと、局面から全計算したハッシュが、ランダムな手順のあいだ一致するかを確かめる。
+// 手は種（seed）で決まる。通常の手・打つ手・成り・取る手・null 手・戻しを混ぜる。
+std::string hashcheck_line(const Game& base, int len, unsigned seed) {
+    Game g = base;
+    std::mt19937 rng(seed);
+    long long checks = 0, bad = 0;
+    std::string first;
+    Move moves[MAX_LEGAL_MOVES];
+    int depth = 0;
+    auto check = [&](const char* what) {
+        checks++;
+        if (g.board.zobrist_key != g.board.calc_zobrist_key_full()) {
+            if (!bad++) first = std::string(what) + " " + g.board.to_sfen_key();
+        }
+    };
+    for (int i = 0; i < len; i++) {
+        const int r = (int)(rng() % 100);
+        if (r < 10 && depth > 0) {
+            g.pop();
+            depth--;
+            check("pop");
+            continue;
+        }
+        if (r < 20) {
+            g.push_null();
+            depth++;
+            check("null");
+            continue;
+        }
+        const int n = (int)(g.gen_legal(moves) - moves);
+        if (n == 0) {  // 手が無ければ、最初の局面に戻す
+            g = base;
+            depth = 0;
+            continue;
+        }
+        g.push(moves[rng() % n]);
+        depth++;
+        check("push");
+    }
+    return "hashcheck checks=" + std::to_string(checks) + " bad=" + std::to_string(bad) + (bad ? " first=" + first : "");
+}
+
 int main() {
     init_bitboards();
     init_zobrist();
@@ -712,6 +824,9 @@ int main() {
         else if (cmd == "sfen") {
             reply("sfen " + game.board.to_sfen_key());
         }
+        else if (cmd == "searchstats") {
+            reply(search::last_stats_line());  // 直前の探索の統計（N8.1）
+        }
         else if (cmd == "moves") {
             std::string out = "moves";
             for (const std::string& m : game.legal_moves_usi()) out += " " + m;
@@ -729,6 +844,12 @@ int main() {
         else if (cmd == "perft") {
             int depth = 0;
             if (in >> depth) reply("perft " + std::to_string(perft(game.board, depth)));
+        }
+        else if (cmd == "hashcheck") {
+            int len = 200;
+            unsigned seed = 1;
+            in >> len >> seed;
+            reply(hashcheck_line(game, len, seed));
         }
         else if (cmd == "key") {
             std::ostringstream hex;

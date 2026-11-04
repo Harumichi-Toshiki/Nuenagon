@@ -2,6 +2,7 @@
 // ルートの手ごとの記録（§E5.4）、ヒントの表（§E5.5）、パスの起点（§E5.6）、出来事の通知（§E5.8）。
 // 重み（Network）は評価に使うだけで、手の進め・戻しは Game（差分更新つき）を使う。
 #pragma once
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -82,15 +83,87 @@ struct Options {
     int search_futility_margin = 250;   // SearchFutilityMargin：futility の深さ1あたりの余裕
     int search_see_margin = 40;         // SearchSEEMargin：SEE 枝刈りの静かな手の閾値（深さ1あたり）
     int search_rfp_depth = 3;           // SearchRFPDepth：RFP を使う最大の深さ（7 は長い詰将棋を 13 問に減らす。3 なら 16 問）
+    int search_singular_margin = 3;     // SearchSingularMargin：singular の余裕（深さ1あたり、点数。sbeta = TT の値 − 余裕 × 深さ）
+    int search_probcut_margin = 200;    // SearchProbCutMargin：ProbCut の余裕（点数。rbeta = β + 余裕）
+    bool search_tt_keep = false;        // SearchTTKeepDeep：同じ世代で、深い項目を浅い保存（静止探索など）で上書きしない（N8.2）
+    bool search_rfp2 = false;           // SearchRFP2：RFP を残り深さ 12 まで、余裕は小さく。詰みを守る条件つき（N8.3）
+    bool search_fut2 = false;           // SearchFut2：静かな手の親の futility（残り深さ 12 まで、余裕は深さに比例）
+    bool search_hist_prune = false;     // SearchHistPrune：連続履歴が悪い静かな手を、浅い深さで飛ばす
+    bool search_lmr2 = false;          // SearchLMR2：LMR を取る手にも、残り深さ 2 以上に広げる。カット・TT の手・履歴で調整
+    int search_rfp2_depth = 12;         // SearchRFP2Depth：RFP2 を使う最大の残り深さ
+    int search_rfp2_margin = 80;        // SearchRFP2Margin：RFP2 の深さ1あたりの余裕（点数）
+    int search_hist_prune_margin = 3000; // SearchHistPruneMargin：連続履歴の閾値（深さ1あたり）
+    int search_qsee_min = 0;            // SearchQSEEMin：静止探索で SEE がこれより悪い取る手は読まない（SearchQSEE が true のとき）
+    bool search_qrecap = false;         // SearchQRecap：静止探索の深い段（3 手目以降）は、直前の手のマスへの取り返しだけ読む（N8.3）
+    int search_qcheck_max = 2;          // SearchQCheckMax：静止探索の最初の段で読む王手の数の上限（SearchQCheck が true のとき）
+    bool search_store_cut = true;      // SearchStoreCut：RFP・NMP・ProbCut で打ち切った節点も、下限として置換表に保存する（N8.2）
+    bool search_lmr_strong = false;     // SearchLMRStrong：並べ替えの点数（履歴＋連続履歴）が負の静かな手は、LMR で 1 段多く減らす（N8.1）
+    int search_corr_rate = 64;          // SearchCorrRate：補正の更新の速さ（大きいほど遅い。更新量 = 差 × min(深さ,8) / 値）
 
     // 並べ替え・静止探索の入り切り（既定は true。false なら N5H と同じ動き）
     bool search_order_see = true;       // SearchOrderSEE：駒を取る手を SEE で分ける（false なら MVV-LVA）
-    bool search_history_gravity = false; // SearchHistoryGravity：履歴を減衰つきで更新し、試した静かな手を減点する（false なら加算のみ）
+    bool search_history_gravity = false;// SearchHistoryGravity：履歴を減衰つきで更新し、試した静かな手を減点する（false なら加算のみ）
     bool search_counter_move = false;    // SearchCounterMove：カウンター手を並べ替えに使う
     bool search_qsee = false;            // SearchQSEE：静止探索で SEE が負の取る手を読まない（false なら N5 の簡易判定）
     bool search_lazy_legal = true;      // SearchLazyLegal：疑似合法手で生成し、指した後に自玉の安全を確かめる（false なら合法手で生成）
     bool search_rfp_guard = false;      // SearchRFPGuard：相手の玉の逃げ道が1つ以下の節点では RFP を使わない（N5.5 の測定で効果が無いため既定は false）
 
+    // N8（探索の深化。既定 false は N7 と同じ動き。測定で既定を決める）
+    bool search_singular = false;       // SearchSingular：置換表の手が他より明らかに良いとき 1 手延長（multi-cut・負の延長を含む）
+    bool search_probcut = false;        // SearchProbCut：取る手の浅い探索で β を大きく超えたら、深く読まずに返す
+    bool search_lmr_history = false;    // SearchLMRHistory：LMR をカットノードで増やし、履歴の効きを細かくする
+    bool search_cont_learn = false;     // SearchContLearn：連続履歴を学習する（N7 は ContHistory を読むだけで書いていなかった）
+    bool search_cont_deep = false;      // SearchContDeep：連続履歴に 4 手前（1・2・4 手前）を使う
+    bool search_cap_hist = false;       // SearchCapHist：取る手の履歴（攻め駒・取られる駒の種類ごと）で並べ替える
+    bool search_corr = true;            // SearchCorrHist：玉の位置ごとに、探索の結果と静的評価のずれを覚えて補正する
+    bool search_check_ext = false;      // SearchCheckExt：王手になる手を 1 手延長する
+    bool search_king_danger = false;    // SearchKingDanger：相手の玉の逃げ道が1つ以下の節点では、LMR と静かな手の枝刈りを使わない
+    bool search_singular_double = false; // SearchSingularDouble：他の手が十分に劣るとき、singular の延長を 2 手にする
+    bool search_drop_late = false;      // SearchDropLate：打つ手を、他の静かな手の後ろに並べる
+    bool search_qcheck = false;         // SearchQCheck：静止探索の最初の 1 手で、王手になる静かな手（SEE ≥ 0）も読む
+
+    // 探索の数値の調整（N8.5）：既定値は以前に直接書かれていた値（docs/SEARCH_PARAMS.md）
+    int search_p_rfp_improving = 60;        // SearchP_RFPImproving：RFP の余裕に足す（改善している局面）
+    int search_p_rfp2_improving = 60;       // SearchP_RFP2Improving：RFP2 の同上
+    int search_p_razor_depth = 2;           // SearchP_RazorDepth：razoring を使う最大の残り深さ
+    int search_p_nmp_depth = 3;             // SearchP_NMPDepth：null move を試す最小の残り深さ
+    int search_p_nmp_base = 2;              // SearchP_NMPBase：null move の削減量 = base + depth / div
+    int search_p_nmp_div = 4;               // SearchP_NMPDiv
+    int search_p_nmp_dyn_base = 3;          // SearchP_NMPDynBase：SearchNullMoveDynamic のときの削減量 base + depth / dyn_div + min(cap, (評価−β) / scale)
+    int search_p_nmp_dyn_div = 3;           // SearchP_NMPDynDiv
+    int search_p_nmp_dyn_cap = 3;           // SearchP_NMPDynCap
+    int search_p_nmp_dyn_scale = 200;       // SearchP_NMPDynScale
+    int search_p_nmp_verify_depth = 12;     // SearchP_NMPVerifyDepth：この残り深さ以上で検証探索をする
+    int search_p_iir_depth = 4;             // SearchP_IIRDepth：内部の反復深化を使う最小の残り深さ
+    int search_p_sing_depth = 7;            // SearchP_SingularDepth：singular を試す最小の残り深さ
+    int search_p_sing_tt_depth = 3;         // SearchP_SingularTTDepth：置換表の深さが残り深さからこれ以内
+    int search_p_probcut_depth = 5;         // SearchP_ProbCutDepth：ProbCut を使う最小の残り深さ
+    int search_p_probcut_reduce = 4;        // SearchP_ProbCutReduce：ProbCut の浅い探索で減らす深さ
+    int search_p_fut_depth = 3;             // SearchP_FutDepth：futility と手の数の枝刈りの最大の残り深さ
+    int search_p_mc_base = 6;               // SearchP_MoveCountBase：手の数の枝刈り = base + scale * depth^2 手目以降を刈る
+    int search_p_mc_scale = 3;              // SearchP_MoveCountScale
+    int search_p_lmp_depth = 8;             // SearchP_LMPDepth：LMP の最大の残り深さ
+    int search_p_lmp_base = 3;              // SearchP_LMPBase：LMP の閾値 = scale * (base + depth^2) / div
+    int search_p_lmp_div = 2;               // SearchP_LMPDiv：改善していない局面の割り
+    int search_p_fut2_depth = 12;           // SearchP_Fut2Depth：親の futility の最大の残り深さ
+    int search_p_fut2_base = 100;           // SearchP_Fut2Base：親の futility の余裕 = base + slope * depth + 履歴（±clamp）
+    int search_p_fut2_slope = 120;          // SearchP_Fut2Slope
+    int search_p_fut2_clamp = 300;          // SearchP_Fut2Clamp
+    int search_p_histprune_depth = 3;       // SearchP_HistPruneDepth：連続履歴による刈り込みの最大の残り深さ
+    int search_p_see_depth = 6;             // SearchP_SEEPruneDepth：SEE による枝刈りの最大の残り深さ
+    int search_p_see_cap_margin = 100;      // SearchP_SEEPruneCapMargin：取る手の SEE の下限 = -margin * depth
+    int search_p_lmr_base = 75;             // SearchP_LMRBase：LMR の表の係数（÷100。75 = 0.75）
+    int search_p_lmr_div = 225;             // SearchP_LMRDiv：LMR の表の除数（÷100。225 = 2.25）
+    int search_p_lmr_hist_clamp = 2;        // SearchP_LMRHistClamp：履歴による LMR の増減の上限（±）
+    int search_p_lmr_legal = 4;             // SearchP_LMRLegal：LMR（簡易）を使い始める手の順番
+    int search_p_lmr_legal2 = 7;            // SearchP_LMRLegal2：簡易 LMR で 2 段減らす手の順番
+    int search_p_hist_bonus_cap = 1600;     // SearchP_HistBonusCap：履歴のボーナス・減点の上限（depth^2 の上限）
+    int search_p_hist_max = 1 << 20;        // SearchP_HistMax：履歴の値の上限（減衰なしの加算）
+    int search_p_asp_depth = 4;             // SearchP_AspDepth：aspiration window を使う最小の深さ
+    int search_p_asp_delta = 20;            // SearchP_AspDelta：aspiration window の初期幅
+    int search_p_asp_max = 500;             // SearchP_AspMaxDelta：この幅を超えたら窓を全幅にする
+    int search_p_corr_depth_cap = 8;        // SearchP_CorrDepthCap：静的評価の補正の学習に使う深さの上限
+    int search_rfp2_guard = 0;              // SearchRFP2Guard：RFP2 の詰み守り（0＝今の条件、1＝相手の 1 手詰めの脅しを見る、2＝1 に加えて詰みの点数に近い β を除く）
     // ヒントの使い方（DJP の hint_weight・hint_lmr_threshold。§E5.5）
     double hint_weight = 1.0;           // 0 なら、ヒントを並べ替えにも LMR にも使わない
     double hint_lmr_threshold = 0.10;   // この確率以上の手は、LMR で減らさない
@@ -141,6 +214,7 @@ struct TTEntry {
     int bound = kExact;
     bool has_move = false;
     Move move{};
+    bool pv = false;        // その局面が PV だった（N8.3：RFP を使わない目安）
 };
 
 class TranspositionTable {
@@ -148,8 +222,9 @@ public:
     void resize(int mb);
     void clear();
     void new_generation() { gen_ = (uint8_t)(gen_ + 1); }
+    void set_keep_deep(bool b) { keep_deep_ = b; }  // SearchTTKeepDeep：今の世代で深いものは、浅い保存で消さない
     bool probe(uint64_t key, TTEntry& e) const;
-    void store(uint64_t key, int depth, int score, int bound, const Move& m, bool has_move);
+    void store(uint64_t key, int depth, int score, int bound, const Move& m, bool has_move, bool pv = false);
     int hashfull() const;  // 千分率（先頭1000項目のうち今の世代のもの）
 private:
     struct Slot {
@@ -159,6 +234,7 @@ private:
     std::unique_ptr<Slot[]> slots_;
     size_t size_ = 0;
     uint8_t gen_ = 0;
+    bool keep_deep_ = false;
 };
 
 // スレッドプール（§E5.2）。探索スレッドを起動時に作り、ジョブの作業（ヘルパー）を受け付ける。
@@ -199,6 +275,20 @@ struct ProbeOut {
     std::vector<Move> pv;   // no のとき：この手を指した後の、相手の咎める手順（手は含まない）
 };
 
+// 探索の統計（N8.1。決定的モードの結果は変えない。searchstats で 1 行に出す）
+struct SearchCounters {
+    enum { kQNodes, kCutNodes, kFirstCut, kTTProbe, kTTHit, kTTCut, kLMR, kLMRResearch, kNMP, kNMPCut, kTTStore, kN };
+    std::atomic<long long> c[kN];
+    std::atomic<long long> depth_nodes[kMaxDepth + 2];  // 反復の深さごとの累計ノード数（EBF に使う）
+    SearchCounters() {
+        for (auto& x : c) x = 0;
+        for (auto& x : depth_nodes) x = 0;
+    }
+};
+
+// 直前の探索の統計を 1 行の文字列にしたもの（searchstats の応答）
+std::string last_stats_line();
+
 // 1つのジョブ（§E5.2）。局面・制限・設定を持ち、Run で探索する。USI の go はジョブ番号0として扱う。
 class Job {
 public:
@@ -232,10 +322,12 @@ public:
         TranspositionTable* tt = nullptr;
         const HintTable* hints = nullptr;
         Options opt;
+        std::array<std::array<int, 64>, 64> lmr{};  // LMR の削減量の表（Job の作成時に opt から作る）
         EvalRef ev;
         InfoSink sink;
         RootReport root_report;
         bool exact_all = false;                 // rank：この段で正確な値を得た手の値を、上限の値で上書きしない
+        SearchCounters cnt;                     // 探索の統計（N8.1）
     };
 private:
     long long budget_ms() const;   // 今の制限から思考時間（ms）を求める。制限なしは -1（§E2.4 の NetworkDelay を差し引く）
